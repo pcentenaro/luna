@@ -18,7 +18,7 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    if message.content.startswith('$hello'):
-        await message.channel.send('Hello!')
+    if message.content.startswith('$echo '):
+        await message.channel.send(message.content[5:])
 
 client.run(os.environ['BOT_TOKEN'])

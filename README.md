@@ -37,9 +37,36 @@ pip install -r requirements.txt
 
 Now the only thing left to do is configure your `.env` file. This file allows you to define variables that contain secret values that you don't want to reveal in your code. The `.env` file is included in `.gitignore`, so it's not pushed to the remote repository when you commit changes. So, for this next step, contact Void for the `.env` file, and then put it in the root of your local repository.
 
-## 2. How to run the bot in AWS
+## 2. How to connect to AWS
 
-[(WIP) Section about connecting to AWS.]
+You can connect to the AWS EC2 instance using the `connect_ec2.sh` script in the root of the repository. Before you run it, you need a private key pair. Key pairs are files containing hash codes that tell the EC2 instance that you are allowed to connect to them. Key pairs should remain a secret, just like the `.env` file; which is why they are registered in `gitignore` as `*.pem`. To receive a key pair, contact Void. Place the key pair in the root of the repository, then add the following lines to your `.env` file:
+
+```bash
+EC2_PUBLIC_DNS="[ec2-instance-dns]"
+KEY_PAIR_FILE="[your-key-pair-file.pem]"
+```
+
+Contact Void if you need to know the EC2 instance's public DNS.
+
+In the root of the repository, run this command:
+
+```bash
+chmod +x connect_ec2.sh
+```
+
+This will allow you to run the connection script, which you can do by typing this:
+
+```bash
+./connect_ec2.sh
+```
+
+If done correctly, you will receive access to the EC2 instance, which you can then manipulate locally. For all further connections, you just have to run the command above. To disconnect from the EC2 instance, run the command:
+
+```bash
+exit
+```
+
+## 3. Running the bot in the EC2 instance
 
 If the bot is not running in AWS, you can start it by running the following commands:
 

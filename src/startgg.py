@@ -45,3 +45,36 @@ class StartGGClient:
             """
         )
         return data.get("currentUser")
+
+    async def get_player(self, player_id: int) -> dict | None:
+        data = await self.query(
+            """
+            query Player($playerId: ID!) {
+              player(id: $playerId) {
+                id
+                gamerTag
+                prefix
+              }
+            }
+            """,
+            {"playerId": player_id},
+        )
+        return data.get("player")
+
+    async def get_player_by_profile_slug(self, profile_slug: str) -> dict | None:
+        data = await self.query(
+            """
+            query UserBySlug($slug: String!) {
+              user(slug: $slug) {
+                player {
+                  id
+                  gamerTag
+                  prefix
+                }
+              }
+            }
+            """,
+            {"slug": profile_slug},
+        )
+        user = data.get("user")
+        return user.get("player") if user else None

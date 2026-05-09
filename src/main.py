@@ -1,7 +1,7 @@
 import discord
 import os # default module
 from dotenv import load_dotenv
-from storage import LinkStore
+from storage import ConfigStore, LinkStore
 from startgg import StartGGClient, StartGGError
 
 load_dotenv() # load all the variables from the env file
@@ -11,6 +11,7 @@ bot = discord.Bot(debug_guilds=debug_guilds)
 startgg_api_key = os.getenv("STARTGG_API_KEY")
 startgg_client = StartGGClient(startgg_api_key) if startgg_api_key else None
 link_store = LinkStore()
+config_store = ConfigStore()
 
 @bot.event
 async def on_ready():
@@ -67,7 +68,7 @@ async def link_startgg(ctx: discord.ApplicationContext, player_id: str):
     )
 
     display_name = format_startgg_player(player)
-    await ctx.respond(f"Linked your Discord account to start.gg player: {display_name}. // Tu cuenta de Discord ha sido ligada al siguiente perfil de start.gg: {display_name}", ephemeral=True)
+    await ctx.respond(f"Linked your Discord account to start.gg player: {display_name}. // Tu cuenta de Discord ha sido vinculada al siguiente perfil de start.gg: {display_name}", ephemeral=True)
 
 async def find_startgg_player(player_reference: str) -> dict | None:
     player_reference = player_reference.strip()
@@ -77,20 +78,20 @@ async def find_startgg_player(player_reference: str) -> dict | None:
     profile_code = player_reference.rstrip("/").split("/")[-1]
     return await startgg_client.get_player_by_profile_slug(f"user/{profile_code}")
 
-@bot.slash_command(name="unlink_startgg", description="Remove your start.gg player link // Elimina el enlace de tu perfil de start.gg")
+@bot.slash_command(name="unlink_startgg", description="Remove your start.gg player link")
 async def unlink_startgg(ctx: discord.ApplicationContext):
     deleted = link_store.delete_startgg_link(ctx.author.id)
     if deleted:
-        await ctx.respond("Removed your start.gg link.", ephemeral=True)
+        await ctx.respond("Removed your start.gg link. // Vinculo a start.gg eliminado.", ephemeral=True)
         return
 
-    await ctx.respond("You do not have a start.gg link yet. // No tienes un enlace a start.gg aún.", ephemeral=True)
+    await ctx.respond("You do not have a start.gg link yet. // No estás vinculado a start.gg aún.", ephemeral=True)
 
 @bot.slash_command(name="whoami_startgg", description="Show your linked start.gg player")
 async def whoami_startgg(ctx: discord.ApplicationContext):
     link = link_store.get_startgg_link(ctx.author.id)
     if link is None:
-        await ctx.respond("You do not have a start.gg link yet. // No tienes un enlace a start.gg aún.", ephemeral=True)
+        await ctx.respond("You do not have a start.gg link yet. // No estás vinculado a start.gg aún.", ephemeral=True)
         return
 
     display_name = format_stored_startgg_player(link)
@@ -99,6 +100,99 @@ async def whoami_startgg(ctx: discord.ApplicationContext):
         f"(ID: {link['startgg_player_id']}).",
         ephemeral=True,
     )
+
+@bot.slash_command(name="set_admin_role", description="Set the role that can manage Luna")
+async def set_admin_role(ctx: discord.ApplicationContext, role: discord.Role):
+    if not can_configure_admin_role(ctx):
+        await ctx.respond("You cannot configure Luna admin roles. // No puedes configurar roles admin de Luna.", ephemeral=True)
+        return
+
+    config_store.set_admin_role_id(role.id)
+    await ctx.respond(f"Luna admin role set to {role.mention}. // Rol admin de Luna definido como {role.mention}.", ephemeral=True)
+
+@bot.slash_command(name="current_admin_role", description="Show the configured Luna admin role")
+async def current_admin_role(ctx: discord.ApplicationContext):
+    admin_role_id = config_store.get_admin_role_id()
+    if admin_role_id is None:
+        await ctx.respond("No Luna admin role is configured yet. // Aún no hay rol admin de Luna configurado.", ephemeral=True)
+        return
+
+    role = ctx.guild.get_role(admin_role_id) if ctx.guild else None
+    role_label = role.mention if role else f"missing role ID {admin_role_id}"
+    await ctx.respond(f"Current Luna admin role: {role_label}. // Rol admin actual de Luna: {role_label}.", ephemeral=True)
+
+@bot.slash_command(name="clear_admin_role", description="Clear the configured Luna admin role")
+async def clear_admin_role(ctx: discord.ApplicationContext):
+    if not is_luna_admin(ctx):
+        await ctx.respond("Only Luna admins can clear the admin role. // Solo admins de Luna pueden eliminar el rol admin.", ephemeral=True)
+        return
+
+    deleted = config_store.clear_admin_role_id()
+    if deleted:
+        await ctx.respond("Luna admin role cleared. // Rol admin de Luna eliminado.", ephemeral=True)
+        return
+
+    await ctx.respond("No Luna admin role was configured. // No había rol admin de Luna configurado.", ephemeral=True)
+
+@bot.slash_command(name="set_event", description="Set the active start.gg event")
+async def set_event(ctx: discord.ApplicationContext, tournament_slug: str, event_slug: str):
+    if not is_luna_admin(ctx):
+        await ctx.respond("Only Luna admins can set the active event. // Solo admins de Luna pueden definir el evento activo.", ephemeral=True)
+        return
+
+    if startgg_client is None:
+        await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+        return
+
+    full_event_slug = build_event_slug(tournament_slug, event_slug)
+    await ctx.defer(ephemeral=True)
+
+    try:
+        event = await startgg_client.get_event_by_slug(full_event_slug)
+    except StartGGError as error:
+        await ctx.respond(f"Could not verify that start.gg event: {error}", ephemeral=True)
+        return
+
+    if event is None:
+        await ctx.respond(f"No start.gg event was found for `{full_event_slug}`.", ephemeral=True)
+        return
+
+    config_store.set_active_event(
+        tournament_slug=tournament_slug,
+        event_slug=full_event_slug,
+        event_id=int(event["id"]),
+        event_name=event["name"],
+    )
+    await ctx.respond(
+        f"Active event set to {event['name']} (`{full_event_slug}`). // Evento activo definido como {event['name']}.",
+        ephemeral=True,
+    )
+
+@bot.slash_command(name="current_event", description="Show the active start.gg event")
+async def current_event(ctx: discord.ApplicationContext):
+    active_event = config_store.get_active_event()
+    if active_event is None:
+        await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
+        return
+
+    await ctx.respond(
+        f"Active event: {active_event['event_name']} (`{active_event['event_slug']}`), "
+        f"ID: {active_event['event_id']}.",
+        ephemeral=True,
+    )
+
+@bot.slash_command(name="clear_event", description="Clear the active start.gg event")
+async def clear_event(ctx: discord.ApplicationContext):
+    if not is_luna_admin(ctx):
+        await ctx.respond("Only Luna admins can clear the active event. // Solo admins de Luna pueden eliminar el evento activo.", ephemeral=True)
+        return
+
+    deleted = config_store.clear_active_event()
+    if deleted:
+        await ctx.respond("Active start.gg event cleared. // Evento activo eliminado.", ephemeral=True)
+        return
+
+    await ctx.respond("No active start.gg event was configured. // No había evento activo configurado.", ephemeral=True)
 
 def format_startgg_player(player: dict) -> str:
     gamer_tag = player.get("gamerTag") or f"Player {player['id']}"
@@ -109,5 +203,32 @@ def format_stored_startgg_player(link: dict) -> str:
     gamer_tag = link.get("startgg_gamer_tag") or f"Player {link['startgg_player_id']}"
     prefix = link.get("startgg_prefix")
     return f"{prefix} | {gamer_tag}" if prefix else gamer_tag
+
+def build_event_slug(tournament_slug: str, event_slug: str) -> str:
+    event_slug = event_slug.strip().strip("/")
+    if event_slug.startswith("tournament/"):
+        return event_slug
+
+    tournament_slug = tournament_slug.strip().strip("/")
+    if tournament_slug.startswith("tournament/"):
+        tournament_slug = tournament_slug.split("/")[1]
+
+    if event_slug.startswith("event/"):
+        event_slug = event_slug.split("/", 1)[1]
+
+    return f"tournament/{tournament_slug}/event/{event_slug}"
+
+def can_configure_admin_role(ctx: discord.ApplicationContext) -> bool:
+    if config_store.get_admin_role_id() is None:
+        return bool(ctx.author.guild_permissions.administrator)
+
+    return is_luna_admin(ctx)
+
+def is_luna_admin(ctx: discord.ApplicationContext) -> bool:
+    admin_role_id = config_store.get_admin_role_id()
+    if admin_role_id is None:
+        return bool(ctx.author.guild_permissions.administrator)
+
+    return any(role.id == admin_role_id for role in ctx.author.roles)
 
 bot.run(os.getenv('BOT_TOKEN')) # run the bot with the token

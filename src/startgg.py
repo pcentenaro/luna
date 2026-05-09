@@ -78,3 +78,18 @@ class StartGGClient:
         )
         user = data.get("user")
         return user.get("player") if user else None
+
+    async def get_event_by_slug(self, event_slug: str) -> dict | None:
+        data = await self.query(
+            """
+            query EventBySlug($slug: String) {
+              event(slug: $slug) {
+                id
+                name
+                slug
+              }
+            }
+            """,
+            {"slug": event_slug},
+        )
+        return data.get("event")

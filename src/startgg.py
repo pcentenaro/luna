@@ -93,3 +93,45 @@ class StartGGClient:
             {"slug": event_slug},
         )
         return data.get("event")
+
+    async def get_event_phases(self, event_id: int) -> list[dict]:
+        data = await self.query(
+            """
+            query EventPhases($eventId: ID!) {
+              event(id: $eventId) {
+                phases {
+                  id
+                  name
+                  numSeeds
+                }
+              }
+            }
+            """,
+            {"eventId": event_id},
+        )
+        event = data.get("event")
+        return event.get("phases", []) if event else []
+
+    async def get_phase_groups(self, phase_id: int) -> list[dict]:
+        data = await self.query(
+            """
+            query PhaseGroups($phaseId: ID!) {
+              phase(id: $phaseId) {
+                phaseGroups(query: {perPage: 50}) {
+                  nodes {
+                    id
+                    displayIdentifier
+                    state
+                    wave {
+                      identifier
+                    }
+                  }
+                }
+              }
+            }
+            """,
+            {"phaseId": phase_id},
+        )
+        phase = data.get("phase")
+        phase_groups = phase.get("phaseGroups", {}) if phase else {}
+        return phase_groups.get("nodes", [])

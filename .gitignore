@@ -1,6 +1,7 @@
 .env
 .vscode
 venv
-src/__pycache__/
+**/__pycache__/
 data/*.json
 *.pem
+**/*:Zone.Identifier

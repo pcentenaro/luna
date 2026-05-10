@@ -1,5 +1,6 @@
 .env
 .vscode
 venv
+src/__pycache__/
+data/*.json
 *.pem
-src/__pycache_

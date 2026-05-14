@@ -264,6 +264,36 @@ async def list_phase_groups(ctx: discord.ApplicationContext, phase_id: str):
         ephemeral=True,
     )
 
+@bot.slash_command(name="list_sets", description="List sets for a start.gg phase group")
+async def list_sets(ctx: discord.ApplicationContext, phase_group_id: str):
+    if startgg_client is None:
+        await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+        return
+
+    try:
+        parsed_phase_group_id = int(phase_group_id)
+    except ValueError:
+        await ctx.respond("The phase group ID must be a number.", ephemeral=True)
+        return
+
+    await ctx.defer(ephemeral=True)
+
+    try:
+        sets = await startgg_client.get_phase_group_sets(parsed_phase_group_id)
+    except StartGGError as error:
+        await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
+        return
+
+    if not sets:
+        await ctx.respond(f"No sets found for phase group ID {parsed_phase_group_id}.", ephemeral=True)
+        return
+
+    set_lines = [format_set_summary(set_data) for set_data in sets]
+    await ctx.respond(
+        f"Sets for phase group ID {parsed_phase_group_id}:\n" + "\n".join(set_lines),
+        ephemeral=True,
+    )
+
 def format_startgg_player(player: dict) -> str:
     gamer_tag = player.get("gamerTag") or f"Player {player['id']}"
     prefix = player.get("prefix")
@@ -273,6 +303,34 @@ def format_stored_startgg_player(link: dict) -> str:
     gamer_tag = link.get("startgg_gamer_tag") or f"Player {link['startgg_player_id']}"
     prefix = link.get("startgg_prefix")
     return f"{prefix} | {gamer_tag}" if prefix else gamer_tag
+
+def format_set_summary(set_data: dict) -> str:
+    slots = set_data.get("slots") or []
+    entrants = [format_slot_summary(slot) for slot in slots]
+
+    while len(entrants) < 2:
+        entrants.append("TBD")
+
+    round_text = set_data.get("fullRoundText") or f"Round {set_data.get('round')}"
+    return (
+        f"- Set {set_data['id']} | {round_text} | state: {set_data.get('state')} | "
+        f"{entrants[0]} vs {entrants[1]}"
+    )
+
+def format_slot_summary(slot: dict) -> str:
+    entrant = slot.get("entrant")
+    if entrant is None:
+        return "TBD"
+
+    score = get_slot_score(slot)
+    score_text = f" [{score}]" if score is not None else ""
+    return f"{entrant.get('name') or 'Unnamed'} (entrant ID: {entrant['id']}){score_text}"
+
+def get_slot_score(slot: dict) -> int | float | None:
+    standing = slot.get("standing") or {}
+    stats = standing.get("stats") or {}
+    score = stats.get("score") or {}
+    return score.get("value")
 
 def build_event_slug(tournament_slug: str, event_slug: str) -> str:
     event_slug = event_slug.strip().strip("/")

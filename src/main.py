@@ -334,6 +334,62 @@ async def my_sets(ctx: discord.ApplicationContext):
         ephemeral=True,
     )
 
+@bot.slash_command(name="preview_report", description="Preview a score report without submitting it")
+async def preview_report(
+    ctx: discord.ApplicationContext,
+    set_id: str,
+    winner: discord.Member,
+    score: str,
+):
+    if startgg_client is None:
+        await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+        return
+
+    try:
+        parsed_set_id = int(set_id)
+    except ValueError:
+        await ctx.respond("The set ID must be a number.", ephemeral=True)
+        return
+
+    parsed_score = parse_score(score)
+    if parsed_score is None:
+        await ctx.respond("Score must use the format `7-5`.", ephemeral=True)
+        return
+
+    winner_link = link_store.get_startgg_link(winner.id)
+    if winner_link is None:
+        await ctx.respond("The winner does not have a start.gg link yet.", ephemeral=True)
+        return
+
+    await ctx.defer(ephemeral=True)
+
+    try:
+        set_data = await startgg_client.get_set(parsed_set_id)
+    except StartGGError as error:
+        await ctx.respond(f"Could not read start.gg set: {error}", ephemeral=True)
+        return
+
+    if set_data is None:
+        await ctx.respond(f"No start.gg set was found with ID {parsed_set_id}.", ephemeral=True)
+        return
+
+    report_preview = build_report_preview(set_data, winner_link["startgg_player_id"], parsed_score)
+    if report_preview["error"]:
+        await ctx.respond(report_preview["error"], ephemeral=True)
+        return
+
+    author_link = link_store.get_startgg_link(ctx.author.id)
+    if not is_luna_admin(ctx):
+        if author_link is None:
+            await ctx.respond("You need to link your start.gg profile before previewing reports.", ephemeral=True)
+            return
+
+        if not set_has_player(set_data, author_link["startgg_player_id"]):
+            await ctx.respond("Only players in this set or Luna admins can preview this report.", ephemeral=True)
+            return
+
+    await ctx.respond(report_preview["message"], ephemeral=True)
+
 async def find_sets_for_player(event_id: int, player_id: int) -> list[dict]:
     matches = []
     phases = await startgg_client.get_event_phases(event_id)
@@ -362,6 +418,56 @@ def set_has_player(set_data: dict, player_id: int) -> bool:
                 return True
 
     return False
+
+def parse_score(score: str) -> tuple[int, int] | None:
+    parts = score.strip().split("-")
+    if len(parts) != 2:
+        return None
+
+    try:
+        left_score = int(parts[0].strip())
+        right_score = int(parts[1].strip())
+    except ValueError:
+        return None
+
+    if left_score < 0 or right_score < 0 or left_score == right_score:
+        return None
+
+    return left_score, right_score
+
+def build_report_preview(set_data: dict, winner_player_id: int, score: tuple[int, int]) -> dict:
+    slots = [slot for slot in set_data.get("slots") or [] if slot.get("entrant")]
+    if len(slots) != 2:
+        return {"error": "This set does not have exactly two entrants yet."}
+
+    winner_slot = find_slot_by_player_id(slots, winner_player_id)
+    if winner_slot is None:
+        return {"error": "The selected winner is not part of this set."}
+
+    loser_slot = slots[0] if slots[1] == winner_slot else slots[1]
+    winner_score, loser_score = sorted(score, reverse=True)
+    if winner_score != 7:
+        return {"error": "Puyo scores must have the winner at 7 points."}
+
+    winner_entrant = winner_slot["entrant"]
+    loser_entrant = loser_slot["entrant"]
+    message = (
+        "Report preview only. Nothing was submitted to start.gg.\n"
+        f"Set {set_data['id']} | {set_data.get('fullRoundText')}\n"
+        f"{winner_entrant['name']} {winner_score} - {loser_score} {loser_entrant['name']}\n"
+        f"Winner entrant ID: {winner_entrant['id']}"
+    )
+    return {"error": None, "message": message}
+
+def find_slot_by_player_id(slots: list[dict], player_id: int) -> dict | None:
+    for slot in slots:
+        entrant = slot.get("entrant") or {}
+        for participant in entrant.get("participants") or []:
+            player = participant.get("player") or {}
+            if str(player.get("id")) == str(player_id):
+                return slot
+
+    return None
 
 def format_startgg_player(player: dict) -> str:
     gamer_tag = player.get("gamerTag") or f"Player {player['id']}"

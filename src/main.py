@@ -390,6 +390,73 @@ async def preview_report(
 
     await ctx.respond(report_preview["message"], ephemeral=True)
 
+@bot.slash_command(name="force_report_result", description="Admin-only: report a set result to start.gg")
+async def force_report_result(
+    ctx: discord.ApplicationContext,
+    set_id: str,
+    winner: discord.Member,
+    score: str,
+):
+    if not is_luna_admin(ctx):
+        await ctx.respond("Only Luna admins can force report results.", ephemeral=True)
+        return
+
+    if startgg_client is None:
+        await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+        return
+
+    try:
+        parsed_set_id = int(set_id)
+    except ValueError:
+        await ctx.respond("The set ID must be a number.", ephemeral=True)
+        return
+
+    parsed_score = parse_score(score)
+    if parsed_score is None:
+        await ctx.respond("Score must use the format `7-5`.", ephemeral=True)
+        return
+
+    winner_link = link_store.get_startgg_link(winner.id)
+    if winner_link is None:
+        await ctx.respond("The winner does not have a start.gg link yet.", ephemeral=True)
+        return
+
+    await ctx.defer(ephemeral=True)
+
+    try:
+        set_data = await startgg_client.get_set(parsed_set_id)
+    except StartGGError as error:
+        await ctx.respond(f"Could not read start.gg set: {error}", ephemeral=True)
+        return
+
+    if set_data is None:
+        await ctx.respond(f"No start.gg set was found with ID {parsed_set_id}.", ephemeral=True)
+        return
+
+    report = build_report_payload(set_data, winner_link["startgg_player_id"], parsed_score)
+    if report["error"]:
+        await ctx.respond(report["error"], ephemeral=True)
+        return
+
+    try:
+        result = await startgg_client.report_set(
+            set_id=parsed_set_id,
+            winner_id=report["winner_entrant_id"],
+            game_data=report["game_data"],
+        )
+    except StartGGError as error:
+        await ctx.respond(f"Could not report start.gg set: {error}", ephemeral=True)
+        return
+
+    result_id = result.get("id") if isinstance(result, dict) else parsed_set_id
+    result_state = result.get("state") if isinstance(result, dict) else "unknown"
+    await ctx.respond(
+        f"Score reported to start.gg.\n"
+        f"Set {result_id}: {report['winner_name']} {report['winner_score']} - {report['loser_score']} {report['loser_name']}\n"
+        f"Set state: {result_state}",
+        ephemeral=True,
+    )
+
 async def find_sets_for_player(event_id: int, player_id: int) -> list[dict]:
     matches = []
     phases = await startgg_client.get_event_phases(event_id)
@@ -436,6 +503,19 @@ def parse_score(score: str) -> tuple[int, int] | None:
     return left_score, right_score
 
 def build_report_preview(set_data: dict, winner_player_id: int, score: tuple[int, int]) -> dict:
+    report = build_report_payload(set_data, winner_player_id, score)
+    if report["error"]:
+        return {"error": report["error"]}
+
+    message = (
+        "Report preview only. Nothing was submitted to start.gg.\n"
+        f"Set {set_data['id']} | {set_data.get('fullRoundText')}\n"
+        f"{report['winner_name']} {report['winner_score']} - {report['loser_score']} {report['loser_name']}\n"
+        f"Winner entrant ID: {report['winner_entrant_id']}"
+    )
+    return {"error": None, "message": message}
+
+def build_report_payload(set_data: dict, winner_player_id: int, score: tuple[int, int]) -> dict:
     slots = [slot for slot in set_data.get("slots") or [] if slot.get("entrant")]
     if len(slots) != 2:
         return {"error": "This set does not have exactly two entrants yet."}
@@ -451,13 +531,50 @@ def build_report_preview(set_data: dict, winner_player_id: int, score: tuple[int
 
     winner_entrant = winner_slot["entrant"]
     loser_entrant = loser_slot["entrant"]
-    message = (
-        "Report preview only. Nothing was submitted to start.gg.\n"
-        f"Set {set_data['id']} | {set_data.get('fullRoundText')}\n"
-        f"{winner_entrant['name']} {winner_score} - {loser_score} {loser_entrant['name']}\n"
-        f"Winner entrant ID: {winner_entrant['id']}"
+    game_data = build_game_data_for_set_score(
+        slots=slots,
+        winner_slot=winner_slot,
+        loser_slot=loser_slot,
+        winner_score=winner_score,
+        loser_score=loser_score,
     )
-    return {"error": None, "message": message}
+    return {
+        "error": None,
+        "winner_entrant_id": int(winner_entrant["id"]),
+        "winner_name": winner_entrant["name"],
+        "winner_score": winner_score,
+        "loser_name": loser_entrant["name"],
+        "loser_score": loser_score,
+        "game_data": game_data,
+    }
+
+def build_game_data_for_set_score(
+    slots: list[dict],
+    winner_slot: dict,
+    loser_slot: dict,
+    winner_score: int,
+    loser_score: int,
+) -> list[dict]:
+    games = []
+    game_num = 1
+
+    for _ in range(winner_score):
+        games.append(build_game_data_entry(slots, winner_slot, game_num))
+        game_num += 1
+
+    for _ in range(loser_score):
+        games.append(build_game_data_entry(slots, loser_slot, game_num))
+        game_num += 1
+
+    return games
+
+def build_game_data_entry(slots: list[dict], winning_slot: dict, game_num: int) -> dict:
+    return {
+        "winnerId": int(winning_slot["entrant"]["id"]),
+        "gameNum": game_num,
+        "entrant1Score": 1 if slots[0] == winning_slot else 0,
+        "entrant2Score": 1 if slots[1] == winning_slot else 0,
+    }
 
 def find_slot_by_player_id(slots: list[dict], player_id: int) -> dict | None:
     for slot in slots:

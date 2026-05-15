@@ -213,3 +213,26 @@ class StartGGClient:
             {"setId": set_id},
         )
         return data.get("set")
+
+    async def report_set(
+        self,
+        set_id: int,
+        winner_id: int,
+        game_data: list[dict] | None = None,
+    ) -> dict | None:
+        data = await self.query(
+            """
+            mutation ReportSet($setId: ID!, $winnerId: ID!, $gameData: [BracketSetGameDataInput]) {
+              reportBracketSet(setId: $setId, winnerId: $winnerId, gameData: $gameData) {
+                id
+                state
+              }
+            }
+            """,
+            {
+                "setId": set_id,
+                "winnerId": winner_id,
+                "gameData": game_data,
+            },
+        )
+        return data.get("reportBracketSet")

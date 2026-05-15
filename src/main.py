@@ -294,6 +294,75 @@ async def list_sets(ctx: discord.ApplicationContext, phase_group_id: str):
         ephemeral=True,
     )
 
+@bot.slash_command(name="my_sets", description="List your sets in the active start.gg event")
+async def my_sets(ctx: discord.ApplicationContext):
+    if startgg_client is None:
+        await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+        return
+
+    active_event = config_store.get_active_event()
+    if active_event is None:
+        await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
+        return
+
+    link = link_store.get_startgg_link(ctx.author.id)
+    if link is None:
+        await ctx.respond("You do not have a start.gg link yet. // No estás vinculado a start.gg aún.", ephemeral=True)
+        return
+
+    await ctx.defer(ephemeral=True)
+
+    try:
+        matching_sets = await find_sets_for_player(
+            event_id=active_event["event_id"],
+            player_id=link["startgg_player_id"],
+        )
+    except StartGGError as error:
+        await ctx.respond(f"Could not read your start.gg sets: {error}", ephemeral=True)
+        return
+
+    if not matching_sets:
+        await ctx.respond(f"No sets found for you in {active_event['event_name']}.", ephemeral=True)
+        return
+
+    set_lines = [
+        format_my_set_summary(match["phase"], match["phase_group"], match["set"])
+        for match in matching_sets
+    ]
+    await ctx.respond(
+        f"Your sets in {active_event['event_name']}:\n" + "\n".join(set_lines),
+        ephemeral=True,
+    )
+
+async def find_sets_for_player(event_id: int, player_id: int) -> list[dict]:
+    matches = []
+    phases = await startgg_client.get_event_phases(event_id)
+    for phase in phases:
+        phase_groups = await startgg_client.get_phase_groups(int(phase["id"]))
+        for phase_group in phase_groups:
+            sets = await startgg_client.get_phase_group_sets(int(phase_group["id"]))
+            for set_data in sets:
+                if set_has_player(set_data, player_id):
+                    matches.append(
+                        {
+                            "phase": phase,
+                            "phase_group": phase_group,
+                            "set": set_data,
+                        }
+                    )
+
+    return matches
+
+def set_has_player(set_data: dict, player_id: int) -> bool:
+    for slot in set_data.get("slots") or []:
+        entrant = slot.get("entrant") or {}
+        for participant in entrant.get("participants") or []:
+            player = participant.get("player") or {}
+            if str(player.get("id")) == str(player_id):
+                return True
+
+    return False
+
 def format_startgg_player(player: dict) -> str:
     gamer_tag = player.get("gamerTag") or f"Player {player['id']}"
     prefix = player.get("prefix")
@@ -315,6 +384,13 @@ def format_set_summary(set_data: dict) -> str:
     return (
         f"- Set {set_data['id']} | {round_text} | state: {set_data.get('state')} | "
         f"{entrants[0]} vs {entrants[1]}"
+    )
+
+def format_my_set_summary(phase: dict, phase_group: dict, set_data: dict) -> str:
+    phase_group_label = phase_group.get("displayIdentifier") or phase_group["id"]
+    return (
+        f"{format_set_summary(set_data)} | "
+        f"phase: {phase['name']} | group: {phase_group_label}"
     )
 
 def format_slot_summary(slot: dict) -> str:
@@ -359,4 +435,5 @@ def is_luna_admin(ctx: discord.ApplicationContext) -> bool:
 
     return any(role.id == admin_role_id for role in ctx.author.roles)
 
-bot.run(os.getenv('BOT_TOKEN')) # run the bot with the token
+if __name__ == "__main__":
+    bot.run(os.getenv('BOT_TOKEN')) # run the bot with the token

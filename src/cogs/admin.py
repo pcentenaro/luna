@@ -119,12 +119,10 @@ class Admin(commands.Cog):
         if not is_luna_admin(ctx):
             await ctx.respond("Only Luna admins can clear the active event. // Solo admins de Luna pueden eliminar el evento activo.", ephemeral=True)
             return
-
         deleted = config.config_store.clear_active_event()
         if deleted:
             await ctx.respond("Active start.gg event cleared. // Evento activo eliminado.", ephemeral=True)
             return
-
         await ctx.respond("No active start.gg event was configured. // No había evento activo configurado.", ephemeral=True)
 
 
@@ -149,12 +147,9 @@ def build_event_slug(tournament_slug: str, event_slug: str) -> str:
     event_slug = event_slug.strip().strip("/")
     if event_slug.startswith("tournament/"):
         return event_slug
-
     tournament_slug = tournament_slug.strip().strip("/")
     if tournament_slug.startswith("tournament/"):
         tournament_slug = tournament_slug.split("/")[1]
-
     if event_slug.startswith("event/"):
         event_slug = event_slug.split("/", 1)[1]
-
     return f"tournament/{tournament_slug}/event/{event_slug}"

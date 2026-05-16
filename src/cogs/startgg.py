@@ -1,7 +1,9 @@
 import config
 import discord
+from datetime import datetime
 from discord.ext import commands
-from startgg import StartGGError
+from startgg import StartGGClient, StartGGError
+
 
 class Startgg(commands.Cog):
 
@@ -9,6 +11,96 @@ class Startgg(commands.Cog):
         self.bot = bot
 
     startgg = discord.SlashCommandGroup("startgg")
+    
+
+    class AccountCommandLinkAccountView(discord.ui.View):
+        def __init__(self, user_id, **kwargs):
+            super().__init__(**kwargs)
+            self.user_id = user_id
+
+        async def on_timeout(self):
+            self.disable_all_items()
+            await self.message.edit(view=None)
+            await self.message.reply("You took too long to reply. Once you have your smash.gg account ID, use this command again to link your account.")
+
+        @discord.ui.button(
+            label= "Link account",
+            style=discord.ButtonStyle.green
+        )
+        async def button_callback(self, button: discord.Button, interaction: discord.Interaction):
+            await interaction.response.send_message("Account successfully linked.")
+            await self.on_timeout()
+
+
+    class AccountCommandUnlinkAccountView(discord.ui.View):
+        def __init__(self, user_id, **kwargs):
+            super().__init__(**kwargs)
+            self.user_id = user_id
+
+        async def on_timeout(self):
+            self.disable_all_items()
+            await self.message.edit(view=None)
+
+        @discord.ui.button(
+            label= "Unlink account",
+            style=discord.ButtonStyle.red
+        )
+        async def button_callback(self, button: discord.Button, interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                return
+            config.link_store.delete_startgg_link(self.user_id)
+            await interaction.response.send_message("Account successfully unlinked.")
+            await self.on_timeout()
+
+
+    @startgg.command(
+            name="account",
+            description="Display and edit your linked smash.gg account"
+    )
+    async def account(self, ctx: discord.ApplicationContext):
+        account_info = config.link_store.get_startgg_link(ctx.user.id)
+        if account_info is None:
+            interaction = await ctx.respond("You don't have an account linked to smash.gg. To link an account, reply to this message with your [smash.gg](<https://www.start.gg/>) account ID.")
+            bot_message = await interaction.original_response()
+            same_user_reply = lambda m: m.reference is not None and ctx.user.id == m.author.id and bot_message.id == m.reference.message_id
+            try:
+                user_reply = await config.bot.wait_for(
+                    event="message",
+                    check=same_user_reply,
+                    timeout=300
+                )
+                player_id = user_reply.content
+                try:
+                    player = await find_startgg_player(player_id)
+                except StartGGError as error:
+                    await ctx.respond(f"Could not verify that start.gg profile: {error}", ephemeral=True)
+                    return
+                if player is None:
+                    await ctx.respond("No start.gg player was found with that ID or profile code.", ephemeral=True)
+                    return
+                config.link_store.set_startgg_link(
+                    discord_user_id=ctx.author.id,
+                    startgg_player_id=int(player["id"]),
+                    gamer_tag=player.get("gamerTag"),
+                    prefix=player.get("prefix")
+                )
+                account_info = config.link_store.get_startgg_link(ctx.user.id)
+            except TimeoutError:
+                await ctx.send("You took too long to reply.")
+        account_embed = discord.Embed(
+                title=f"smash.gg account for {ctx.user.display_name}",
+                thumbnail=ctx.user.display_avatar.url,
+                fields=[
+                    discord.EmbedField("account name", account_info["startgg_gamer_tag"], inline=True),
+                    discord.EmbedField("account ID", account_info["startgg_player_id"], inline=True),
+                    discord.EmbedField("updated on", str(datetime.fromisoformat(account_info["updated_at"]).date()), inline=True)
+                ]
+            )
+        await ctx.respond(
+            embed=account_embed,
+            view=self.AccountCommandUnlinkAccountView(ctx.user.id, timeout=30)
+        )
+        return
 
 
     @startgg.command(
@@ -16,10 +108,6 @@ class Startgg(commands.Cog):
             description="Link your Discord account to a start.gg profile"
     )
     async def link_startgg(self, ctx: discord.ApplicationContext, player_id: str):
-        if config.startgg_client is None:
-            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
-            return
-        await ctx.defer(ephemeral=True)
         try:
             player = await find_startgg_player(player_id)
         except StartGGError as error:

@@ -11,25 +11,6 @@ class Startgg(commands.Cog):
         self.bot = bot
 
     startgg = discord.SlashCommandGroup("startgg")
-    
-
-    class AccountCommandLinkAccountView(discord.ui.View):
-        def __init__(self, user_id, **kwargs):
-            super().__init__(**kwargs)
-            self.user_id = user_id
-
-        async def on_timeout(self):
-            self.disable_all_items()
-            await self.message.edit(view=None)
-            await self.message.reply("You took too long to reply. Once you have your smash.gg account ID, use this command again to link your account.")
-
-        @discord.ui.button(
-            label= "Link account",
-            style=discord.ButtonStyle.green
-        )
-        async def button_callback(self, button: discord.Button, interaction: discord.Interaction):
-            await interaction.response.send_message("Account successfully linked.")
-            await self.on_timeout()
 
 
     class AccountCommandUnlinkAccountView(discord.ui.View):
@@ -86,7 +67,8 @@ class Startgg(commands.Cog):
                 )
                 account_info = config.link_store.get_startgg_link(ctx.user.id)
             except TimeoutError:
-                await ctx.send("You took too long to reply.")
+                await bot_message.edit(content="You took too long to reply with your [smash.gg](<https://www.start.gg/>) ID. If you want to link your account, use `/startgg account` again.")
+                return
         account_embed = discord.Embed(
                 title=f"smash.gg account for {ctx.user.display_name}",
                 thumbnail=ctx.user.display_avatar.url,
@@ -101,57 +83,6 @@ class Startgg(commands.Cog):
             view=self.AccountCommandUnlinkAccountView(ctx.user.id, timeout=30)
         )
         return
-
-
-    @startgg.command(
-            name="link_startgg",
-            description="Link your Discord account to a start.gg profile"
-    )
-    async def link_startgg(self, ctx: discord.ApplicationContext, player_id: str):
-        try:
-            player = await find_startgg_player(player_id)
-        except StartGGError as error:
-            await ctx.respond(f"Could not verify that start.gg profile: {error}", ephemeral=True)
-            return
-        if player is None:
-            await ctx.respond("No start.gg player was found with that ID or profile code.", ephemeral=True)
-            return
-        config.link_store.set_startgg_link(
-            discord_user_id=ctx.author.id,
-            startgg_player_id=int(player["id"]),
-            gamer_tag=player.get("gamerTag"),
-            prefix=player.get("prefix"),
-        )
-        display_name = format_startgg_player(player)
-        await ctx.respond(f"Linked your Discord account to start.gg player: {display_name}. // Tu cuenta de Discord ha sido vinculada al siguiente perfil de start.gg: {display_name}", ephemeral=True)
-
-
-    @startgg.command(
-            name="unlink_startgg",
-            description="Remove your start.gg player link"
-    )
-    async def unlink_startgg(self, ctx: discord.ApplicationContext):
-        deleted = config.link_store.delete_startgg_link(ctx.author.id)
-        if deleted:
-            await ctx.respond("Removed your start.gg link. // Vinculo a start.gg eliminado.", ephemeral=True)
-            return
-        await ctx.respond("You do not have a start.gg link yet. // No estás vinculado a start.gg aún.", ephemeral=True)
-    
-
-    @startgg.command(
-            name="whoami_startgg",
-            description="Show your linked start.gg player")
-    async def whoami_startgg(self, ctx: discord.ApplicationContext):
-        link = config.link_store.get_startgg_link(ctx.author.id)
-        if link is None:
-            await ctx.respond("You do not have a start.gg link yet. // No estás vinculado a start.gg aún.", ephemeral=True)
-            return
-        display_name = format_stored_startgg_player(link)
-        await ctx.respond(
-            f"Your Discord account is linked to start.gg player {display_name} "
-            f"(ID: {link['startgg_player_id']}).",
-            ephemeral=True,
-        )
     
     
     @startgg.command(

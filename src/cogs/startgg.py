@@ -83,7 +83,39 @@ class Startgg(commands.Cog):
             view=self.AccountCommandUnlinkAccountView(ctx.user.id, timeout=30)
         )
         return
-    
+
+
+    @startgg.command(
+            name="event",
+            description="Display information about the current start.gg event"
+    )
+    async def event(self, ctx: discord.ApplicationContext):
+        active_event = config.config_store.get_active_event()
+        if active_event is None:
+            await ctx.respond("No active start.gg event is configured yet.")
+            return
+        phases = await config.startgg_client.get_event_phases(active_event["event_id"])
+        if not phases:
+            await ctx.respond(f"No phases found for {active_event['event_name']}.", ephemeral=True)
+            return
+        embed_fields = []
+        for phase in phases:
+            phase_groups = await config.startgg_client.get_phase_groups(phase["id"])
+            phase_state = min([group["state"] for group in phase_groups])
+            fields = [
+                discord.EmbedField("phase", f"[{phase["name"]}](https://www.start.gg/{active_event["event_slug"]}/brackets/{phase["id"]})", True),
+                discord.EmbedField("brackets", len(phase_groups), True),
+                discord.EmbedField("status", phase_states_dict[phase_state], True)
+            ]
+            embed_fields.extend(fields)
+        general_info_embed = discord.Embed(
+            title=active_event["event_name"],
+            description="**General information**",
+            url=f"https://www.start.gg/{active_event["event_slug"]}",
+            fields=embed_fields
+        )
+        await ctx.respond(embed=general_info_embed)
+
     
     @startgg.command(
             name="current_event",
@@ -288,6 +320,17 @@ class Startgg(commands.Cog):
 
 def setup(bot):
     bot.add_cog(Startgg(bot))
+
+
+phase_states_dict = {
+        1: "created",
+        2: "active",
+        3: "completed",
+        4: "ready",
+        5: "invalid",
+        6: "called",
+        7: "queue"
+    }
 
 
 def format_startgg_player(player: dict) -> str:

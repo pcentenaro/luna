@@ -1,5 +1,6 @@
 import config
 import discord
+from cogs.views.admin_panel import AdminPanelView, build_admin_panel_embed
 from discord.ext import commands
 from startgg import StartGGError
 
@@ -9,6 +10,20 @@ class Admin(commands.Cog):
         self.bot = bot
 
     admin = discord.SlashCommandGroup("admin")
+
+    @admin.command(
+            name="panel",
+            description="Send the Luna admin panel"
+    )
+    async def panel(self, ctx: discord.ApplicationContext):
+        if not is_luna_admin(ctx):
+            await ctx.respond("Only Luna admins can send the admin panel.", ephemeral=True)
+            return
+
+        await ctx.respond(
+            embed=build_admin_panel_embed(ctx.guild),
+            view=AdminPanelView(),
+        )
 
     @admin.command(
             description="Check the start.gg API connection",

@@ -2,6 +2,8 @@ import config
 import discord
 from discord.ext import commands
 from startgg import StartGGError
+from cairosvg import svg2png
+
 
 class Admin(commands.Cog):
 
@@ -9,6 +11,14 @@ class Admin(commands.Cog):
         self.bot = bot
 
     admin = discord.SlashCommandGroup("admin")
+
+    @admin.command(
+            name="podium"
+    )
+    async def podium(self, ctx: discord.ApplicationContext):
+        svg2png(url="rsc/podium.svg", write_to="rsc/podium.png")
+        await ctx.respond(file=discord.File("rsc/podium.png"))
+
 
     @admin.command(
             description="Check the start.gg API connection",

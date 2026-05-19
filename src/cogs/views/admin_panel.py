@@ -1,6 +1,7 @@
 import discord
 
 import config
+from startgg import StartGGError
 
 
 LUNA_AVATAR_URL = "https://cdn.discordapp.com/avatars/1501361206106132591/34addba16ae128186eb6c18777e71865.png?size=4096"
@@ -20,7 +21,24 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Start.gg status", style=discord.ButtonStyle.secondary, row=0)
     async def startgg_status(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_message("Start.gg status check coming next.", ephemeral=True)
+        if config.startgg_client is None:
+            await interaction.response.send_message("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            user = await config.startgg_client.get_current_user()
+        except StartGGError as error:
+            await interaction.followup.send(f"start.gg connection failed: {error}", ephemeral=True)
+            return
+
+        if user is None:
+            await interaction.followup.send("Connected to start.gg, but no current user was returned.", ephemeral=True)
+            return
+
+        display_name = user.get("name") or user.get("slug") or user.get("id")
+        await interaction.followup.send(f"Connected to start.gg as {display_name}.", ephemeral=True)
 
     @discord.ui.button(label="Set admin role", style=discord.ButtonStyle.primary, row=1)
     async def set_admin_role(self, button: discord.ui.Button, interaction: discord.Interaction):

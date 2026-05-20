@@ -26,11 +26,12 @@ class AdminPanelView(discord.ui.View):
             return
 
         deleted = config.config_store.clear_active_event()
+        await refresh_admin_panel_response(interaction)
         if deleted:
-            await interaction.response.send_message("Active start.gg event cleared.", ephemeral=True)
+            await interaction.followup.send("Active start.gg event cleared.", ephemeral=True)
             return
 
-        await interaction.response.send_message("No active start.gg event was configured.", ephemeral=True)
+        await interaction.followup.send("No active start.gg event was configured.", ephemeral=True)
 
     @discord.ui.button(label="Start.gg status", style=discord.ButtonStyle.secondary, row=0)
     async def startgg_status(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -55,11 +56,25 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Set admin role", style=discord.ButtonStyle.primary, row=1)
     async def set_admin_role(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_message("Set admin role flow coming next.", ephemeral=True)
+        if not can_configure_admin_role(interaction):
+            await interaction.response.send_message("You cannot configure Luna admin roles.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(SetAdminRoleModal())
 
     @discord.ui.button(label="Clear admin role", style=discord.ButtonStyle.danger, row=1)
     async def clear_admin_role(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_message("Clear admin role flow coming next.", ephemeral=True)
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can clear the admin role.", ephemeral=True)
+            return
+
+        deleted = config.config_store.clear_admin_role_id()
+        await refresh_admin_panel_response(interaction)
+        if deleted:
+            await interaction.followup.send("Luna admin role cleared.", ephemeral=True)
+            return
+
+        await interaction.followup.send("No Luna admin role was configured.", ephemeral=True)
 
 
 def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
@@ -139,9 +154,56 @@ class SetEventModal(discord.ui.Modal):
             event_id=int(event["id"]),
             event_name=event["name"],
         )
+        await refresh_admin_panel(interaction)
         await interaction.followup.send(
             f"Active event set to {event['name']} (`{full_event_slug}`).",
             ephemeral=True,
+        )
+
+
+class SetAdminRoleModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Set Luna admin role")
+        self.add_item(
+            discord.ui.InputText(
+                label="Role ID or mention",
+                placeholder="@Admin, <@&123456789>, or 123456789",
+                required=True,
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        role_id = parse_role_id(self.children[0].value)
+        if role_id is None:
+            await interaction.response.send_message("Could not read a role ID from that value.", ephemeral=True)
+            return
+
+        role = interaction.guild.get_role(role_id) if interaction.guild else None
+        if role is None:
+            await interaction.response.send_message(f"No role found with ID `{role_id}` in this server.", ephemeral=True)
+            return
+
+        config.config_store.set_admin_role_id(role.id)
+        await refresh_admin_panel(interaction)
+        await interaction.response.send_message(f"Luna admin role set to {role.mention}.", ephemeral=True)
+
+
+async def refresh_admin_panel_response(interaction: discord.Interaction):
+    if interaction.message:
+        await interaction.response.edit_message(
+            embed=build_admin_panel_embed(interaction.guild),
+            view=AdminPanelView(),
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+
+async def refresh_admin_panel(interaction: discord.Interaction):
+    if interaction.message:
+        await interaction.message.edit(
+            embed=build_admin_panel_embed(interaction.guild),
+            view=AdminPanelView(),
         )
 
 
@@ -151,6 +213,21 @@ def is_luna_admin(interaction: discord.Interaction) -> bool:
         return bool(interaction.user.guild_permissions.administrator)
 
     return any(role.id == admin_role_id for role in interaction.user.roles)
+
+
+def can_configure_admin_role(interaction: discord.Interaction) -> bool:
+    if config.config_store.get_admin_role_id() is None:
+        return bool(interaction.user.guild_permissions.administrator)
+
+    return is_luna_admin(interaction)
+
+
+def parse_role_id(value: str) -> int | None:
+    digits = "".join(character for character in value if character.isdigit())
+    if not digits:
+        return None
+
+    return int(digits)
 
 
 def build_event_slug(tournament_slug: str, event_slug: str) -> str:

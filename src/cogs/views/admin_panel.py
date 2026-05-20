@@ -1,7 +1,7 @@
 import discord
 
 import config
-from startgg import StartGGError
+from startgg import StartGGError, format_user_display_name
 
 
 LUNA_AVATAR_URL = "https://cdn.discordapp.com/avatars/1501361206106132591/34addba16ae128186eb6c18777e71865.png?size=4096"
@@ -51,7 +51,7 @@ class AdminPanelView(discord.ui.View):
             await interaction.followup.send("Connected to start.gg, but no current user was returned.", ephemeral=True)
             return
 
-        display_name = user.get("slug") or user.get("id")
+        display_name = format_user_display_name(user)
         await interaction.followup.send(f"Connected to start.gg as {display_name}.", ephemeral=True)
 
     @discord.ui.button(label="Set admin role", style=discord.ButtonStyle.primary, row=1)
@@ -212,11 +212,18 @@ def is_luna_admin(interaction: discord.Interaction) -> bool:
     if admin_role_id is None:
         return bool(interaction.user.guild_permissions.administrator)
 
+    if interaction.guild and interaction.guild.get_role(admin_role_id) is None:
+        return bool(interaction.user.guild_permissions.administrator)
+
     return any(role.id == admin_role_id for role in interaction.user.roles)
 
 
 def can_configure_admin_role(interaction: discord.Interaction) -> bool:
-    if config.config_store.get_admin_role_id() is None:
+    admin_role_id = config.config_store.get_admin_role_id()
+    if admin_role_id is None:
+        return bool(interaction.user.guild_permissions.administrator)
+
+    if interaction.guild and interaction.guild.get_role(admin_role_id) is None:
         return bool(interaction.user.guild_permissions.administrator)
 
     return is_luna_admin(interaction)

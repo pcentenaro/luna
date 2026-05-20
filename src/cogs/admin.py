@@ -2,7 +2,7 @@ import config
 import discord
 from cogs.views.admin_panel import AdminPanelView, build_admin_panel_embed
 from discord.ext import commands
-from startgg import StartGGError
+from startgg import StartGGError, format_user_display_name
 
 class Admin(commands.Cog):
 
@@ -44,7 +44,7 @@ class Admin(commands.Cog):
         if user is None:
             await ctx.respond("Connected to start.gg, but no current user was returned.")
             return
-        display_name = user.get("name") or user.get("slug") or user.get("id")
+        display_name = format_user_display_name(user)
         await ctx.respond(f"Connected to start.gg as {display_name}.")
 
 
@@ -145,11 +145,16 @@ def is_luna_admin(ctx: discord.ApplicationContext) -> bool:
     admin_role_id = config.config_store.get_admin_role_id()
     if admin_role_id is None:
         return bool(ctx.author.guild_permissions.administrator)
+    if ctx.guild and ctx.guild.get_role(admin_role_id) is None:
+        return bool(ctx.author.guild_permissions.administrator)
     return any(role.id == admin_role_id for role in ctx.author.roles)
 
 
 def can_configure_admin_role(ctx: discord.ApplicationContext) -> bool:
-    if config.config_store.get_admin_role_id() is None:
+    admin_role_id = config.config_store.get_admin_role_id()
+    if admin_role_id is None:
+        return bool(ctx.author.guild_permissions.administrator)
+    if ctx.guild and ctx.guild.get_role(admin_role_id) is None:
         return bool(ctx.author.guild_permissions.administrator)
     return is_luna_admin(ctx)
 

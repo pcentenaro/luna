@@ -13,11 +13,24 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Set event", style=discord.ButtonStyle.primary, row=0)
     async def set_event(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_message("Set event flow coming next.", ephemeral=True)
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the active event.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(SetEventModal())
 
     @discord.ui.button(label="Clear event", style=discord.ButtonStyle.danger, row=0)
     async def clear_event(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_message("Clear event flow coming next.", ephemeral=True)
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can clear the active event.", ephemeral=True)
+            return
+
+        deleted = config.config_store.clear_active_event()
+        if deleted:
+            await interaction.response.send_message("Active start.gg event cleared.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("No active start.gg event was configured.", ephemeral=True)
 
     @discord.ui.button(label="Start.gg status", style=discord.ButtonStyle.secondary, row=0)
     async def startgg_status(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -37,7 +50,7 @@ class AdminPanelView(discord.ui.View):
             await interaction.followup.send("Connected to start.gg, but no current user was returned.", ephemeral=True)
             return
 
-        display_name = user.get("name") or user.get("slug") or user.get("id")
+        display_name = user.get("slug") or user.get("id")
         await interaction.followup.send(f"Connected to start.gg as {display_name}.", ephemeral=True)
 
     @discord.ui.button(label="Set admin role", style=discord.ButtonStyle.primary, row=1)
@@ -79,3 +92,77 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     embed.add_field(name="Start.gg", value=startgg_value, inline=True)
     embed.set_footer(text="Copa Luna tournament tools")
     return embed
+
+
+class SetEventModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Set active start.gg event")
+        self.add_item(
+            discord.ui.InputText(
+                label="Tournament slug",
+                placeholder="torneo-pruebas-bot-luna",
+                required=True,
+            )
+        )
+        self.add_item(
+            discord.ui.InputText(
+                label="Event slug",
+                placeholder="puyo-singles",
+                required=True,
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        tournament_slug = self.children[0].value
+        event_slug = self.children[1].value
+
+        if config.startgg_client is None:
+            await interaction.response.send_message("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+            return
+
+        full_event_slug = build_event_slug(tournament_slug, event_slug)
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            event = await config.startgg_client.get_event_by_slug(full_event_slug)
+        except StartGGError as error:
+            await interaction.followup.send(f"Could not verify that start.gg event: {error}", ephemeral=True)
+            return
+
+        if event is None:
+            await interaction.followup.send(f"No start.gg event was found for `{full_event_slug}`.", ephemeral=True)
+            return
+
+        config.config_store.set_active_event(
+            tournament_slug=tournament_slug,
+            event_slug=full_event_slug,
+            event_id=int(event["id"]),
+            event_name=event["name"],
+        )
+        await interaction.followup.send(
+            f"Active event set to {event['name']} (`{full_event_slug}`).",
+            ephemeral=True,
+        )
+
+
+def is_luna_admin(interaction: discord.Interaction) -> bool:
+    admin_role_id = config.config_store.get_admin_role_id()
+    if admin_role_id is None:
+        return bool(interaction.user.guild_permissions.administrator)
+
+    return any(role.id == admin_role_id for role in interaction.user.roles)
+
+
+def build_event_slug(tournament_slug: str, event_slug: str) -> str:
+    event_slug = event_slug.strip().strip("/")
+    if event_slug.startswith("tournament/"):
+        return event_slug
+
+    tournament_slug = tournament_slug.strip().strip("/")
+    if tournament_slug.startswith("tournament/"):
+        tournament_slug = tournament_slug.split("/")[1]
+
+    if event_slug.startswith("event/"):
+        event_slug = event_slug.split("/", 1)[1]
+
+    return f"tournament/{tournament_slug}/event/{event_slug}"

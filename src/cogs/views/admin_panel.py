@@ -173,14 +173,9 @@ class SetAdminRoleModal(discord.ui.Modal):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        role_id = parse_role_id(self.children[0].value)
-        if role_id is None:
-            await interaction.response.send_message("Could not read a role ID from that value.", ephemeral=True)
-            return
-
-        role = interaction.guild.get_role(role_id) if interaction.guild else None
+        role = find_role(interaction.guild, self.children[0].value)
         if role is None:
-            await interaction.response.send_message(f"No role found with ID `{role_id}` in this server.", ephemeral=True)
+            await interaction.response.send_message("No role found with that ID, mention, or name in this server.", ephemeral=True)
             return
 
         config.config_store.set_admin_role_id(role.id)
@@ -229,12 +224,44 @@ def can_configure_admin_role(interaction: discord.Interaction) -> bool:
     return is_luna_admin(interaction)
 
 
+def find_role(guild: discord.Guild | None, value: str) -> discord.Role | None:
+    if guild is None:
+        return None
+
+    role_id = parse_role_id(value)
+    if role_id is not None:
+        role = guild.get_role(role_id)
+        if role:
+            return role
+
+    role_name = normalize_role_name(value)
+    exact_match = discord.utils.get(guild.roles, name=role_name)
+    if exact_match:
+        return exact_match
+
+    lowercase_matches = [
+        role for role in guild.roles
+        if role.name.casefold() == role_name.casefold()
+    ]
+    if len(lowercase_matches) == 1:
+        return lowercase_matches[0]
+
+    return None
+
+
 def parse_role_id(value: str) -> int | None:
     digits = "".join(character for character in value if character.isdigit())
     if not digits:
         return None
 
     return int(digits)
+
+
+def normalize_role_name(value: str) -> str:
+    value = value.strip()
+    if value.startswith("@"):
+        value = value[1:]
+    return value.strip()
 
 
 def build_event_slug(tournament_slug: str, event_slug: str) -> str:

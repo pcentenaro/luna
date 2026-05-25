@@ -150,42 +150,39 @@ class Startgg(commands.Cog):
 
 
     @startgg.command(
-            name="list_sets",
-            description="List sets for a start.gg phase group"
+            name="sets",
+            description="List sets by phase group ID, phase name, or your linked player"
     )
-    async def list_sets(self, ctx: discord.ApplicationContext, phase_group_id: str):
+    async def sets(
+        self,
+        ctx: discord.ApplicationContext,
+        phase: str = discord.Option(
+            str,
+            description="Optional phase group ID or phase name",
+            required=False,
+            default=None,
+        ),
+    ):
         if config.startgg_client is None:
             await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
             return
-        try:
-            parsed_phase_group_id = int(phase_group_id)
-        except ValueError:
-            await ctx.respond("The phase group ID must be a number.", ephemeral=True)
-            return
-        await ctx.defer(ephemeral=True)
-        try:
-            sets = await config.startgg_client.get_phase_group_sets(parsed_phase_group_id)
-        except StartGGError as error:
-            await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
-            return
-        if not sets:
-            await ctx.respond(f"No sets found for phase group ID {parsed_phase_group_id}.", ephemeral=True)
-            return
-        set_lines = [format_set_summary(set_data) for set_data in sets]
-        await ctx.respond(
-            f"Sets for phase group ID {parsed_phase_group_id}:\n" + "\n".join(set_lines),
-            ephemeral=True,
-        )
 
+        if phase:
+            phase = phase.strip()
+            await ctx.defer(ephemeral=True)
 
-    @startgg.command(
-            name="my_sets",
-            description="List your sets in the active start.gg event"
-    )
-    async def my_sets(self, ctx: discord.ApplicationContext):
-        if config.startgg_client is None:
-            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+            if phase.isdigit():
+                await respond_with_phase_group_sets(ctx, int(phase))
+                return
+
+            active_event = config.config_store.get_active_event()
+            if active_event is None:
+                await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
+                return
+
+            await respond_with_phase_sets(ctx, active_event, phase)
             return
+
         active_event = config.config_store.get_active_event()
         if active_event is None:
             await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
@@ -315,6 +312,91 @@ async def find_sets_for_player(event_id: int, player_id: int) -> list[dict]:
                         }
                     )
     return matches
+
+
+async def respond_with_phase_group_sets(ctx: discord.ApplicationContext, phase_group_id: int):
+    try:
+        sets = await config.startgg_client.get_phase_group_sets(phase_group_id)
+    except StartGGError as error:
+        await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
+        return
+
+    if not sets:
+        await ctx.respond(f"No sets found for phase group ID {phase_group_id}.", ephemeral=True)
+        return
+
+    set_lines = [format_set_summary(set_data) for set_data in sets]
+    await ctx.respond(
+        format_lines_response(f"Sets for phase group ID {phase_group_id}:", set_lines),
+        ephemeral=True,
+    )
+
+
+async def respond_with_phase_sets(ctx: discord.ApplicationContext, active_event: dict, phase_name: str):
+    try:
+        phases = await config.startgg_client.get_event_phases(active_event["event_id"])
+    except StartGGError as error:
+        await ctx.respond(f"Could not read start.gg phases: {error}", ephemeral=True)
+        return
+
+    matching_phases = find_phases_by_name(phases, phase_name)
+    if not matching_phases:
+        phase_names = ", ".join(phase["name"] for phase in phases) or "none"
+        await ctx.respond(
+            f"No phase named `{phase_name}` was found in {active_event['event_name']}. "
+            f"Available phases: {phase_names}.",
+            ephemeral=True,
+        )
+        return
+
+    set_lines = []
+    for phase in matching_phases:
+        try:
+            phase_groups = await config.startgg_client.get_phase_groups(int(phase["id"]))
+        except StartGGError as error:
+            await ctx.respond(f"Could not read start.gg phase groups: {error}", ephemeral=True)
+            return
+
+        for phase_group in phase_groups:
+            try:
+                sets = await config.startgg_client.get_phase_group_sets(int(phase_group["id"]))
+            except StartGGError as error:
+                await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
+                return
+
+            set_lines.extend(
+                format_phase_set_summary(phase, phase_group, set_data)
+                for set_data in sets
+            )
+
+    if not set_lines:
+        await ctx.respond(f"No sets found for phase `{phase_name}`.", ephemeral=True)
+        return
+
+    matched_names = ", ".join(phase["name"] for phase in matching_phases)
+    await ctx.respond(
+        format_lines_response(f"Sets for phase {matched_names}:", set_lines),
+        ephemeral=True,
+    )
+
+
+def find_phases_by_name(phases: list[dict], phase_name: str) -> list[dict]:
+    normalized_name = normalize_lookup_text(phase_name)
+    exact_matches = [
+        phase for phase in phases
+        if normalize_lookup_text(phase["name"]) == normalized_name
+    ]
+    if exact_matches:
+        return exact_matches
+
+    return [
+        phase for phase in phases
+        if normalized_name in normalize_lookup_text(phase["name"])
+    ]
+
+
+def normalize_lookup_text(value: str) -> str:
+    return " ".join(value.casefold().split())
 
 
 def set_has_player(set_data: dict, player_id: int) -> bool:
@@ -449,6 +531,13 @@ def format_my_set_summary(phase: dict, phase_group: dict, set_data: dict) -> str
         f"phase: {phase['name']} | group: {phase_group_label}"
     )
 
+def format_phase_set_summary(phase: dict, phase_group: dict, set_data: dict) -> str:
+    phase_group_label = phase_group.get("displayIdentifier") or phase_group["id"]
+    return (
+        f"{format_set_summary(set_data)} | "
+        f"group: {phase_group_label} (ID: {phase_group['id']})"
+    )
+
 def format_slot_summary(slot: dict) -> str:
     entrant = slot.get("entrant")
     if entrant is None:
@@ -463,6 +552,17 @@ def get_slot_score(slot: dict) -> int | float | None:
     stats = standing.get("stats") or {}
     score = stats.get("score") or {}
     return score.get("value")
+
+def format_lines_response(title: str, lines: list[str], limit: int = 1900) -> str:
+    message_lines = [title]
+    for index, line in enumerate(lines):
+        candidate = "\n".join([*message_lines, line])
+        remaining = len(lines) - index
+        if len(candidate) > limit:
+            message_lines.append(f"...and {remaining} more.")
+            break
+        message_lines.append(line)
+    return "\n".join(message_lines)
 
 def build_event_slug(tournament_slug: str, event_slug: str) -> str:
     event_slug = event_slug.strip().strip("/")

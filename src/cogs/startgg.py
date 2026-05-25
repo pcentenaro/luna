@@ -352,7 +352,7 @@ class ReportConfirmationView(discord.ui.View):
         self.confirmed_user_ids = set()
         self.finished = False
 
-    @discord.ui.button(emoji="✅", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
         if not await self.can_use_button(interaction):
             return
@@ -391,7 +391,7 @@ class ReportConfirmationView(discord.ui.View):
             view=self,
         )
 
-    @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
     async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
         if not await self.can_use_button(interaction):
             return

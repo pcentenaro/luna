@@ -116,53 +116,6 @@ class Startgg(commands.Cog):
         )
         await ctx.respond(embed=general_info_embed)
 
-    
-    @startgg.command(
-            name="current_event",
-            description="Show the active start.gg event"
-    )
-    async def current_event(self, ctx: discord.ApplicationContext):
-        active_event = config.config_store.get_active_event()
-        if active_event is None:
-            await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
-            return
-        await ctx.respond(
-            f"Active event: {active_event['event_name']} (`{active_event['event_slug']}`), "
-            f"ID: {active_event['event_id']}.",
-            ephemeral=True,
-        )
-    
-
-    @startgg.command(
-            name="list_phases",
-            description="List phases for the active start.gg event"
-    )
-    async def list_phases(self, ctx: discord.ApplicationContext):
-        if config.startgg_client is None:
-            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
-            return
-        active_event = config.config_store.get_active_event()
-        if active_event is None:
-            await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
-            return
-        await ctx.defer(ephemeral=True)
-        try:
-            phases = await config.startgg_client.get_event_phases(active_event["event_id"])
-        except StartGGError as error:
-            await ctx.respond(f"Could not read start.gg phases: {error}", ephemeral=True)
-            return
-        if not phases:
-            await ctx.respond(f"No phases found for {active_event['event_name']}.", ephemeral=True)
-            return
-        phase_lines = [
-            f"- {phase['name']} (ID: {phase['id']}, seeds: {phase.get('numSeeds') or 0})"
-            for phase in phases
-        ]
-        await ctx.respond(
-            f"Phases for {active_event['event_name']}:\n" + "\n".join(phase_lines),
-            ephemeral=True,
-        )
-
 
     @startgg.command(
             name="list_phase_groups",

@@ -40,6 +40,11 @@ class StartGGClient:
                 id
                 slug
                 name
+                player {
+                  id
+                  gamerTag
+                  prefix
+                }
               }
             }
             """
@@ -236,3 +241,15 @@ class StartGGClient:
             },
         )
         return data.get("reportBracketSet")
+
+
+def format_user_display_name(user: dict) -> str:
+    player = user.get("player") or {}
+    gamer_tag = player.get("gamerTag")
+    prefix = player.get("prefix")
+    if gamer_tag and prefix:
+        return f"{prefix} | {gamer_tag}"
+    if gamer_tag:
+        return gamer_tag
+
+    return user.get("name") or user.get("slug") or user.get("id")

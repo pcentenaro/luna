@@ -94,7 +94,12 @@ class Startgg(commands.Cog):
         if active_event is None:
             await ctx.respond("No active start.gg event is configured yet.")
             return
-        phases = await config.startgg_client.get_event_phases(active_event["event_id"])
+        await ctx.defer()
+        try:
+            phases = await config.startgg_client.get_event_phases(active_event["event_id"])
+        except StartGGError as error:
+            await ctx.respond(f"Could not read start.gg phases: {error}", ephemeral=True)
+            return
         if not phases:
             await ctx.respond(f"No phases found for {active_event['event_name']}.", ephemeral=True)
             return
@@ -192,27 +197,30 @@ class Startgg(commands.Cog):
             await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
             return
         link = config.link_store.get_startgg_link(ctx.author.id)
-        if link is None:
-            await ctx.respond("You do not have a start.gg link yet. // No estás vinculado a start.gg aún.", ephemeral=True)
-            return
         await ctx.defer(ephemeral=True)
         try:
-            matching_sets = await find_sets_for_player(
-                event_id=active_event["event_id"],
-                player_id=link["startgg_player_id"],
-            )
+            event_matches = await find_sets_for_event(active_event["event_id"])
         except StartGGError as error:
-            await ctx.respond(f"Could not read your start.gg sets: {error}", ephemeral=True)
+            await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
             return
-        if not matching_sets:
-            await ctx.respond(f"No sets found for you in {active_event['event_name']}.", ephemeral=True)
-            return
-        set_lines = [
-            format_my_set_summary(match["phase"], match["phase_group"], match["set"])
-            for match in matching_sets
-        ]
+
+        player_matches = []
+        if link is not None:
+            player_matches = [
+                match for match in event_matches
+                if set_has_player(match["set"], link["startgg_player_id"])
+            ]
+
+        view = SetsInfoView(
+            active_event=active_event,
+            link=link,
+            player_matches=player_matches,
+            event_matches=event_matches,
+            user_id=ctx.author.id,
+        )
         await ctx.respond(
-            f"Your sets in {active_event['event_name']}:\n" + "\n".join(set_lines),
+            embed=view.current_embed(),
+            view=view,
             ephemeral=True,
         )
     
@@ -268,6 +276,74 @@ class Startgg(commands.Cog):
         await ctx.respond(report_preview["message"], ephemeral=True)
 
 
+    @discord.slash_command(
+            name="report",
+            description="Report your next pending start.gg set"
+    )
+    async def report(self, ctx: discord.ApplicationContext, score: str):
+        if config.startgg_client is None:
+            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+            return
+
+        active_event = config.config_store.get_active_event()
+        if active_event is None:
+            await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
+            return
+
+        link = config.link_store.get_startgg_link(ctx.author.id)
+        if link is None:
+            await ctx.respond("You do not have a start.gg link yet. // No estás vinculado a start.gg aún.", ephemeral=True)
+            return
+
+        parsed_score = parse_score(score)
+        if parsed_score is None:
+            await ctx.respond("Score must use the format `7-5`.", ephemeral=True)
+            return
+
+        await ctx.defer()
+        try:
+            matching_sets = await find_sets_for_player(
+                event_id=active_event["event_id"],
+                player_id=link["startgg_player_id"],
+            )
+        except StartGGError as error:
+            await ctx.respond(f"Could not read your start.gg sets: {error}", ephemeral=True)
+            return
+
+        next_match = find_next_pending_match(matching_sets)
+        if next_match is None:
+            await ctx.respond(f"No pending sets found for you in {active_event['event_name']}.", ephemeral=True)
+            return
+
+        report = build_player_report_payload(
+            set_data=next_match["set"],
+            player_id=link["startgg_player_id"],
+            score=parsed_score,
+        )
+        if report["error"]:
+            await ctx.respond(report["error"], ephemeral=True)
+            return
+
+        opponent_link = config.link_store.get_startgg_link_by_player_id(report["opponent_player_id"])
+        if opponent_link is None:
+            await ctx.respond("Your opponent must link their start.gg profile before this result can be confirmed.", ephemeral=True)
+            return
+
+        view = ReportConfirmationView(
+            match=next_match,
+            report=report,
+            active_event=active_event,
+            player_discord_ids={
+                int(link["discord_user_id"]),
+                int(opponent_link["discord_user_id"]),
+            },
+        )
+        await ctx.respond(
+            build_player_report_confirmation_message(next_match, report),
+            view=view,
+        )
+
+
 def setup(bot):
     bot.add_cog(Startgg(bot))
 
@@ -281,6 +357,159 @@ phase_states_dict = {
         6: "called",
         7: "queue"
     }
+
+
+class SetsInfoView(discord.ui.View):
+    def __init__(
+        self,
+        active_event: dict,
+        link: dict | None,
+        player_matches: list[dict],
+        event_matches: list[dict],
+        user_id: int,
+    ):
+        super().__init__(timeout=300)
+        self.active_event = active_event
+        self.link = link
+        self.player_matches = player_matches
+        self.event_matches = event_matches
+        self.user_id = user_id
+        self.mode = "next" if player_matches else "general"
+        self.update_button_states()
+
+    @discord.ui.button(label="Next set", style=discord.ButtonStyle.primary)
+    async def next_set(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not await self.can_use_button(interaction):
+            return
+        self.mode = "next"
+        self.update_button_states()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    @discord.ui.button(label="My sets", style=discord.ButtonStyle.secondary)
+    async def my_sets(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not await self.can_use_button(interaction):
+            return
+        self.mode = "my"
+        self.update_button_states()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    @discord.ui.button(label="General sets", style=discord.ButtonStyle.secondary)
+    async def general_sets(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not await self.can_use_button(interaction):
+            return
+        self.mode = "general"
+        self.update_button_states()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    async def can_use_button(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who used this command can switch this view.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        self.disable_all_items()
+
+    def current_embed(self) -> discord.Embed:
+        if self.mode == "next":
+            return build_next_set_embed(self.active_event, self.link, self.player_matches)
+        if self.mode == "my":
+            return build_my_sets_embed(self.active_event, self.link, self.player_matches)
+        return build_general_sets_embed(self.active_event, self.event_matches)
+
+    def update_button_states(self):
+        for child in self.children:
+            if child.label == "Next set":
+                child.disabled = not self.player_matches
+                child.style = discord.ButtonStyle.primary if self.mode == "next" else discord.ButtonStyle.secondary
+            elif child.label == "My sets":
+                child.disabled = not self.player_matches
+                child.style = discord.ButtonStyle.primary if self.mode == "my" else discord.ButtonStyle.secondary
+            elif child.label == "General sets":
+                child.style = discord.ButtonStyle.primary if self.mode == "general" else discord.ButtonStyle.secondary
+
+
+class ReportConfirmationView(discord.ui.View):
+    def __init__(
+        self,
+        match: dict,
+        report: dict,
+        active_event: dict,
+        player_discord_ids: set[int],
+    ):
+        super().__init__(timeout=600)
+        self.match = match
+        self.report = report
+        self.active_event = active_event
+        self.player_discord_ids = player_discord_ids
+        self.confirmed_user_ids = set()
+        self.finished = False
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not await self.can_use_button(interaction):
+            return
+
+        self.confirmed_user_ids.add(interaction.user.id)
+        if self.confirmed_user_ids != self.player_discord_ids:
+            await interaction.response.edit_message(
+                content=build_player_report_confirmation_message(
+                    self.match,
+                    self.report,
+                    confirmed_count=len(self.confirmed_user_ids),
+                ),
+                view=self,
+            )
+            return
+
+        self.finished = True
+        self.disable_all_items()
+        await interaction.response.defer()
+
+        try:
+            await config.startgg_client.report_set(
+                set_id=int(self.match["set"]["id"]),
+                winner_id=self.report["winner_entrant_id"],
+                game_data=self.report["game_data"],
+            )
+        except StartGGError as error:
+            await interaction.message.edit(
+                content=f"Could not report start.gg set: {error}",
+                view=self,
+            )
+            return
+
+        await interaction.message.edit(
+            content=build_player_report_success_message(self.match, self.report, self.active_event),
+            view=self,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not await self.can_use_button(interaction):
+            return
+
+        self.finished = True
+        self.disable_all_items()
+        await interaction.response.edit_message(
+            content="Result report cancelled. Run `/report` again when both players are ready.",
+            view=self,
+        )
+
+    async def can_use_button(self, interaction: discord.Interaction) -> bool:
+        if self.finished:
+            await interaction.response.send_message("This report confirmation is already closed.", ephemeral=True)
+            return False
+
+        if interaction.user.id not in self.player_discord_ids:
+            await interaction.response.send_message("Only the two players in this set can confirm this result.", ephemeral=True)
+            return False
+
+        return True
+
+    async def on_timeout(self):
+        self.finished = True
+        self.disable_all_items()
 
 
 def format_startgg_player(player: dict) -> str:
@@ -327,6 +556,292 @@ async def find_sets_for_player(event_id: int, player_id: int) -> list[dict]:
                         }
                     )
     return matches
+
+
+async def find_sets_for_event(event_id: int) -> list[dict]:
+    matches = []
+    phases = await config.startgg_client.get_event_phases(event_id)
+    for phase in phases:
+        phase_groups = await config.startgg_client.get_phase_groups(int(phase["id"]))
+        for phase_group in phase_groups:
+            sets = await config.startgg_client.get_phase_group_sets(int(phase_group["id"]))
+            for set_data in sets:
+                matches.append(
+                    {
+                        "phase": phase,
+                        "phase_group": phase_group,
+                        "set": set_data,
+                    }
+                )
+    return sort_set_matches(matches)
+
+
+def sort_set_matches(matches: list[dict]) -> list[dict]:
+    return sorted(
+        matches,
+        key=lambda match: (
+            str(match["phase"].get("name") or ""),
+            str(match["phase_group"].get("displayIdentifier") or ""),
+            get_set_round(match["set"]),
+            int(match["set"].get("id") or 0),
+        ),
+    )
+
+
+def find_next_pending_match(matches: list[dict]) -> dict | None:
+    pending_matches = [
+        match for match in matches
+        if is_pending_set(match["set"]) and has_two_entrants(match["set"])
+    ]
+    if not pending_matches:
+        return None
+
+    return sorted(
+        pending_matches,
+        key=lambda match: (
+            get_set_round(match["set"]),
+            str(match["phase"].get("name") or ""),
+            str(match["phase_group"].get("displayIdentifier") or ""),
+            int(match["set"].get("id") or 0),
+        ),
+    )[0]
+
+
+def is_pending_set(set_data: dict) -> bool:
+    state = set_data.get("state")
+    return str(state).casefold() not in {"3", "completed"}
+
+
+def has_two_entrants(set_data: dict) -> bool:
+    return len([slot for slot in set_data.get("slots") or [] if slot.get("entrant")]) == 2
+
+
+def get_set_round(set_data: dict) -> int:
+    try:
+        return int(set_data.get("round"))
+    except (TypeError, ValueError):
+        return 999999
+
+
+def build_player_report_payload(set_data: dict, player_id: int, score: tuple[int, int]) -> dict:
+    player_slot = find_slot_by_player_id(set_data.get("slots") or [], player_id)
+    if player_slot is None:
+        return {"error": "You are not part of this set."}
+
+    opponent_slot = find_opponent_slot(set_data, player_slot)
+    if opponent_slot is None:
+        return {"error": "This set does not have an opponent yet."}
+
+    player_score, opponent_score = score
+    if player_score > opponent_score:
+        winner_player_id = player_id
+    else:
+        winner_player_id = get_slot_player_id(opponent_slot)
+        if winner_player_id is None:
+            return {"error": "Could not find your opponent's start.gg player ID."}
+
+    report = build_report_payload(set_data, winner_player_id, score)
+    if report["error"]:
+        return report
+
+    report["player_name"] = player_slot["entrant"]["name"]
+    report["player_score"] = player_score
+    report["player_id"] = player_id
+    report["opponent_name"] = opponent_slot["entrant"]["name"]
+    report["opponent_score"] = opponent_score
+    report["opponent_player_id"] = get_slot_player_id(opponent_slot)
+    return report
+
+
+def find_opponent_slot(set_data: dict, player_slot: dict) -> dict | None:
+    for slot in set_data.get("slots") or []:
+        if slot.get("entrant") and slot != player_slot:
+            return slot
+    return None
+
+
+def get_slot_player_id(slot: dict) -> int | None:
+    entrant = slot.get("entrant") or {}
+    for participant in entrant.get("participants") or []:
+        player = participant.get("player") or {}
+        player_id = player.get("id")
+        if player_id is not None:
+            return int(player_id)
+    return None
+
+
+def build_player_report_success_message(match: dict, report: dict, active_event: dict) -> str:
+    set_data = match["set"]
+    phase = match["phase"]
+    phase_group = match["phase_group"]
+    phase_group_label = phase_group.get("displayIdentifier") or phase_group["id"]
+    round_text = set_data.get("fullRoundText") or f"Round {set_data.get('round')}"
+    return (
+        f"Score reported for {active_event['event_name']}.\n"
+        f"{phase['name']} - Group {phase_group_label} | {round_text}\n"
+        f"Set ID: {set_data['id']}\n"
+        f"{report['player_name']} {report['player_score']} - "
+        f"{report['opponent_score']} {report['opponent_name']}"
+    )
+
+
+def build_player_report_confirmation_message(match: dict, report: dict, confirmed_count: int = 0) -> str:
+    set_data = match["set"]
+    phase = match["phase"]
+    phase_group = match["phase_group"]
+    phase_group_label = phase_group.get("displayIdentifier") or phase_group["id"]
+    round_text = set_data.get("fullRoundText") or f"Round {set_data.get('round')}"
+    return (
+        "Resultado a reportar:\n"
+        f"{report['player_name']} ({report['player_score']}) - "
+        f"({report['opponent_score']}) {report['opponent_name']}.\n\n"
+        f"{phase['name']} - Group {phase_group_label} | {round_text}\n"
+        f"Set ID: {set_data['id']}\n\n"
+        "Seleccionen ✅ para confirmar o ❌ para cancelar.\n"
+        f"Confirmaciones: {confirmed_count}/2"
+    )
+
+
+def build_next_set_embed(active_event: dict, link: dict | None, player_matches: list[dict]) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{active_event['event_name']} sets",
+        description="Your next pending set",
+        color=discord.Color.gold(),
+    )
+    embed.url = f"https://www.start.gg/{active_event['event_slug']}"
+
+    if link is None:
+        embed.description = "No linked start.gg account"
+        embed.add_field(
+            name="Next set",
+            value="Link your account with `/startgg account` to see your next set.",
+            inline=False,
+        )
+        return embed
+
+    next_match = find_next_pending_match(player_matches)
+    if next_match is None:
+        embed.add_field(
+            name="Next set",
+            value="No pending sets found for your linked player.",
+            inline=False,
+        )
+        return embed
+
+    embed.add_field(name="Next set", value=format_match_card(next_match), inline=False)
+    remaining_pending = [
+        match for match in player_matches
+        if is_pending_set(match["set"]) and has_two_entrants(match["set"])
+    ]
+    if len(remaining_pending) > 1:
+        embed.set_footer(text=f"{len(remaining_pending) - 1} more pending set(s) after this one")
+    return embed
+
+
+def build_my_sets_embed(active_event: dict, link: dict | None, player_matches: list[dict]) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{active_event['event_name']} sets",
+        description="Your sets",
+        color=discord.Color.gold(),
+    )
+    embed.url = f"https://www.start.gg/{active_event['event_slug']}"
+
+    if link is None:
+        embed.description = "No linked start.gg account"
+        embed.add_field(
+            name="My sets",
+            value="Link your account with `/startgg account` to see your sets.",
+            inline=False,
+        )
+        return embed
+
+    if not player_matches:
+        embed.add_field(
+            name="My sets",
+            value="No sets found for your linked player in this event.",
+            inline=False,
+        )
+        return embed
+
+    for match in player_matches[:8]:
+        embed.add_field(
+            name=format_match_title(match),
+            value=format_match_pair(match["set"]),
+            inline=False,
+        )
+    if len(player_matches) > 8:
+        embed.set_footer(text=f"{len(player_matches) - 8} more set(s) not shown")
+    return embed
+
+
+def build_general_sets_embed(active_event: dict, event_matches: list[dict]) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{active_event['event_name']} sets",
+        description="General set information",
+        color=discord.Color.gold(),
+    )
+    embed.url = f"https://www.start.gg/{active_event['event_slug']}"
+
+    if not event_matches:
+        embed.add_field(name="Sets", value="No sets found for this event.", inline=False)
+        return embed
+
+    pending_matches = [
+        match for match in event_matches
+        if is_pending_set(match["set"]) and has_two_entrants(match["set"])
+    ]
+    completed_count = len(event_matches) - len(pending_matches)
+    embed.add_field(name="Total sets", value=str(len(event_matches)), inline=True)
+    embed.add_field(name="Pending", value=str(len(pending_matches)), inline=True)
+    embed.add_field(name="Completed", value=str(completed_count), inline=True)
+
+    matches_to_show = pending_matches[:8] if pending_matches else event_matches[:8]
+    for match in matches_to_show:
+        embed.add_field(
+            name=format_match_title(match),
+            value=format_match_pair(match["set"]),
+            inline=False,
+        )
+    hidden_count = len(event_matches) - len(matches_to_show)
+    if hidden_count > 0:
+        embed.set_footer(text=f"{hidden_count} more set(s) not shown")
+    return embed
+
+
+def format_match_card(match: dict) -> str:
+    set_data = match["set"]
+    return (
+        f"{format_match_title(match)}\n"
+        f"{format_match_pair(set_data)}\n"
+        f"Set ID: `{set_data['id']}`"
+    )
+
+
+def format_match_title(match: dict) -> str:
+    phase = match["phase"]
+    phase_group = match["phase_group"]
+    set_data = match["set"]
+    phase_group_label = phase_group.get("displayIdentifier") or phase_group["id"]
+    round_text = set_data.get("fullRoundText") or f"Round {set_data.get('round')}"
+    return f"{phase['name']} - Group {phase_group_label} | {round_text}"
+
+
+def format_match_pair(set_data: dict) -> str:
+    slots = set_data.get("slots") or []
+    entrants = [format_slot_name_with_score(slot) for slot in slots]
+    while len(entrants) < 2:
+        entrants.append("TBD")
+    return f"{entrants[0]} vs {entrants[1]}"
+
+
+def format_slot_name_with_score(slot: dict) -> str:
+    entrant = slot.get("entrant")
+    if entrant is None:
+        return "TBD"
+
+    score = get_slot_score(slot)
+    score_text = f" ({score})" if score is not None else ""
+    return f"{entrant.get('name') or 'Unnamed'}{score_text}"
 
 
 async def respond_with_phase_group_sets(ctx: discord.ApplicationContext, phase_group_id: int):

@@ -329,19 +329,31 @@ class Startgg(commands.Cog):
             await ctx.respond("Your opponent must link their start.gg profile before this result can be confirmed.", ephemeral=True)
             return
 
+        set_id = int(next_match["set"]["id"])
+        player_discord_ids = {
+            int(link["discord_user_id"]),
+            int(opponent_link["discord_user_id"]),
+        }
+        pending_report_message = get_pending_report_message(set_id, player_discord_ids)
+        if pending_report_message:
+            await ctx.respond(pending_report_message)
+            return
+
+        register_pending_report(set_id, player_discord_ids)
         view = ReportConfirmationView(
             match=next_match,
             report=report,
             active_event=active_event,
-            player_discord_ids={
-                int(link["discord_user_id"]),
-                int(opponent_link["discord_user_id"]),
-            },
+            player_discord_ids=player_discord_ids,
         )
-        await ctx.respond(
-            build_player_report_confirmation_message(next_match, report),
-            view=view,
-        )
+        try:
+            await ctx.respond(
+                build_player_report_confirmation_message(next_match, report),
+                view=view,
+            )
+        except Exception:
+            release_pending_report(set_id, player_discord_ids)
+            raise
 
 
 def setup(bot):
@@ -357,6 +369,10 @@ phase_states_dict = {
         6: "called",
         7: "queue"
     }
+
+
+pending_report_user_ids_by_set: dict[int, set[int]] = {}
+pending_report_set_id_by_user: dict[int, int] = {}
 
 
 class SetsInfoView(discord.ui.View):
@@ -473,12 +489,14 @@ class ReportConfirmationView(discord.ui.View):
                 game_data=self.report["game_data"],
             )
         except StartGGError as error:
+            release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
             await interaction.message.edit(
                 content=f"Could not report start.gg set: {error}",
                 view=self,
             )
             return
 
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
         await interaction.message.edit(
             content=build_player_report_success_message(self.match, self.report, self.active_event),
             view=self,
@@ -491,6 +509,7 @@ class ReportConfirmationView(discord.ui.View):
 
         self.finished = True
         self.disable_all_items()
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
         await interaction.response.edit_message(
             content="Result report cancelled. Run `/report` again when both players are ready.",
             view=self,
@@ -510,6 +529,35 @@ class ReportConfirmationView(discord.ui.View):
     async def on_timeout(self):
         self.finished = True
         self.disable_all_items()
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+
+
+def get_pending_report_message(set_id: int, player_discord_ids: set[int]) -> str | None:
+    if set_id in pending_report_user_ids_by_set:
+        return "There is already a pending report confirmation for this set."
+
+    for player_discord_id in player_discord_ids:
+        pending_set_id = pending_report_set_id_by_user.get(player_discord_id)
+        if pending_set_id is not None:
+            return (
+                "One of the players already has a pending report confirmation. "
+                "Confirm or cancel that report before creating another one."
+            )
+
+    return None
+
+
+def register_pending_report(set_id: int, player_discord_ids: set[int]):
+    pending_report_user_ids_by_set[set_id] = set(player_discord_ids)
+    for player_discord_id in player_discord_ids:
+        pending_report_set_id_by_user[player_discord_id] = set_id
+
+
+def release_pending_report(set_id: int, player_discord_ids: set[int]):
+    pending_report_user_ids_by_set.pop(set_id, None)
+    for player_discord_id in player_discord_ids:
+        if pending_report_set_id_by_user.get(player_discord_id) == set_id:
+            pending_report_set_id_by_user.pop(player_discord_id, None)
 
 
 def format_startgg_player(player: dict) -> str:

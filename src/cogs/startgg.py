@@ -275,6 +275,38 @@ class Startgg(commands.Cog):
                 return
         await ctx.respond(report_preview["message"], ephemeral=True)
 
+    @startgg.command(
+            name="inspect_set",
+            description="Inspect a start.gg set for debugging"
+    )
+    async def inspect_set(self, ctx: discord.ApplicationContext, set_id: str):
+        if not is_luna_admin(ctx):
+            await ctx.respond("Only Luna admins can inspect sets.", ephemeral=True)
+            return
+
+        if config.startgg_client is None:
+            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+            return
+
+        try:
+            parsed_set_id = int(set_id)
+        except ValueError:
+            await ctx.respond("The set ID must be a number.", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+        try:
+            set_data = await config.startgg_client.get_set_inspection(parsed_set_id)
+        except StartGGError as error:
+            await ctx.respond(f"Could not inspect start.gg set: {error}", ephemeral=True)
+            return
+
+        if set_data is None:
+            await ctx.respond(f"No start.gg set was found with ID {parsed_set_id}.", ephemeral=True)
+            return
+
+        await ctx.respond(format_set_inspection(set_data), ephemeral=True)
+
 
     @discord.slash_command(
             name="report",
@@ -748,6 +780,51 @@ def build_player_report_confirmation_message(match: dict, report: dict, confirme
         "Seleccionen ✅ para confirmar o ❌ para cancelar.\n"
         f"Confirmaciones: {confirmed_count}/2"
     )
+
+
+def format_set_inspection(set_data: dict) -> str:
+    lines = [
+        f"Set inspection for `{set_data['id']}`",
+        f"Round: {get_set_round_label(set_data)}",
+        f"State: {set_data.get('state')}",
+        f"Winner ID: {set_data.get('winnerId')}",
+        "",
+        "Slots:",
+    ]
+
+    for index, slot in enumerate(set_data.get("slots") or [], start=1):
+        entrant = slot.get("entrant") or {}
+        standing = slot.get("standing") or {}
+        stats = standing.get("stats") or {}
+        score = (stats.get("score") or {}).get("value")
+        player_ids = [
+            str((participant.get("player") or {}).get("id"))
+            for participant in entrant.get("participants") or []
+            if (participant.get("player") or {}).get("id") is not None
+        ]
+        lines.append(
+            f"- Slot {index}: entrant `{entrant.get('id')}` {entrant.get('name')} | "
+            f"score: `{score}` | placement: `{standing.get('placement')}` | "
+            f"players: {', '.join(player_ids) or 'none'}"
+        )
+
+    games = set_data.get("games") or []
+    lines.extend(["", f"Games: {len(games)}"])
+    for game in games[:10]:
+        selections = game.get("selections") or []
+        selection_labels = [
+            f"`{(selection.get('entrant') or {}).get('id')}` {(selection.get('entrant') or {}).get('name')}"
+            for selection in selections
+        ]
+        lines.append(
+            f"- Game `{game.get('id')}` | state: `{game.get('state')}` | "
+            f"winnerId: `{game.get('winnerId')}` | selections: {', '.join(selection_labels) or 'none'}"
+        )
+
+    if len(games) > 10:
+        lines.append(f"...and {len(games) - 10} more games.")
+
+    return format_lines_response("", lines).lstrip()
 
 
 def build_next_set_embed(active_event: dict, link: dict | None, player_matches: list[dict]) -> discord.Embed:

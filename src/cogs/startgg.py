@@ -2,6 +2,7 @@ import asyncio
 import config
 import discord
 from datetime import datetime
+from datetime import timezone
 from discord.ext import commands
 from startgg import StartGGClient, StartGGError
 
@@ -530,6 +531,7 @@ class ReportConfirmationView(discord.ui.View):
         self.confirmed_user_ids = set()
         self.finished = False
         self.message = None
+        self.last_admin_ping_at = None
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -597,10 +599,7 @@ class ReportConfirmationView(discord.ui.View):
             return
 
         if interaction.user.id in self.player_discord_ids:
-            await interaction.response.send_message(
-                build_admin_help_message(self.match),
-                allowed_mentions=discord.AllowedMentions(roles=True),
-            )
+            await send_admin_ping_with_cooldown(self, interaction)
             return
 
         await interaction.response.send_message("Only players in this set or Luna admins can use this button.", ephemeral=True)
@@ -635,6 +634,7 @@ class DQRequestView(discord.ui.View):
         self.player_discord_ids = player_discord_ids
         self.finished = False
         self.message = None
+        self.last_admin_ping_at = None
 
     @discord.ui.button(label="Ping Admin", style=discord.ButtonStyle.secondary)
     async def ping_admin(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -646,10 +646,7 @@ class DQRequestView(discord.ui.View):
             await interaction.response.send_message("Only players in this set or Luna admins can use this button.", ephemeral=True)
             return
 
-        await interaction.response.send_message(
-            build_admin_help_message(self.match),
-            allowed_mentions=discord.AllowedMentions(roles=True),
-        )
+        await send_admin_ping_with_cooldown(self, interaction)
 
     @discord.ui.button(label="Admin DQ", style=discord.ButtonStyle.danger)
     async def admin_dq(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -739,6 +736,25 @@ class DQReportModal(discord.ui.Modal):
                 view=self.report_view,
             )
         await interaction.followup.send("DQ reported.", ephemeral=True)
+
+
+async def send_admin_ping_with_cooldown(view, interaction: discord.Interaction):
+    now = datetime.now(timezone.utc)
+    if view.last_admin_ping_at is not None:
+        elapsed_seconds = (now - view.last_admin_ping_at).total_seconds()
+        if elapsed_seconds < 15:
+            retry_after = int(15 - elapsed_seconds) + 1
+            await interaction.response.send_message(
+                f"Admin ping is on cooldown. Try again in {retry_after} second(s).",
+                ephemeral=True,
+            )
+            return
+
+    view.last_admin_ping_at = now
+    await interaction.response.send_message(
+        build_admin_help_message(view.match),
+        allowed_mentions=discord.AllowedMentions(roles=True),
+    )
 
 
 def get_pending_report_message(set_id: int, player_discord_ids: set[int]) -> str | None:

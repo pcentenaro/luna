@@ -280,7 +280,17 @@ class Startgg(commands.Cog):
             name="report",
             description="Report your next pending start.gg set"
     )
-    async def report(self, ctx: discord.ApplicationContext, score: str):
+    async def report(
+        self,
+        ctx: discord.ApplicationContext,
+        score: str,
+        opponent: discord.Member = discord.Option(
+            discord.Member,
+            description="Optional opponent if you are not reporting your next set",
+            required=False,
+            default=None,
+        ),
+    ):
         if config.startgg_client is None:
             await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
             return
@@ -292,7 +302,7 @@ class Startgg(commands.Cog):
 
         await ctx.defer()
         try:
-            report_context = await get_next_report_context(ctx)
+            report_context = await get_next_report_context(ctx, opponent)
             if report_context["error"]:
                 await ctx.respond(report_context["error"], ephemeral=True)
                 return
@@ -759,7 +769,7 @@ def release_pending_report(set_id: int, player_discord_ids: set[int]):
             pending_report_set_id_by_user.pop(player_discord_id, None)
 
 
-async def get_next_report_context(ctx: discord.ApplicationContext) -> dict:
+async def get_next_report_context(ctx: discord.ApplicationContext, opponent: discord.Member | None = None) -> dict:
     active_event = config.config_store.get_active_event()
     if active_event is None:
         return {"error": "No active start.gg event is configured yet. // Aún no hay evento activo configurado."}
@@ -768,6 +778,14 @@ async def get_next_report_context(ctx: discord.ApplicationContext) -> dict:
     if link is None:
         return {"error": "You do not have a start.gg link yet. // No estás vinculado a start.gg aún."}
 
+    opponent_link = None
+    if opponent is not None:
+        if opponent.id == ctx.author.id:
+            return {"error": "You cannot report a set against yourself."}
+        opponent_link = config.link_store.get_startgg_link(opponent.id)
+        if opponent_link is None:
+            return {"error": "That opponent does not have a start.gg link yet."}
+
     matching_sets = await asyncio.wait_for(
         find_sets_for_player(
             event_id=active_event["event_id"],
@@ -775,8 +793,16 @@ async def get_next_report_context(ctx: discord.ApplicationContext) -> dict:
         ),
         timeout=20,
     )
-    next_match = find_next_pending_match(matching_sets)
+    if opponent_link is not None:
+        next_match = find_next_pending_match_against_player(
+            matching_sets,
+            opponent_link["startgg_player_id"],
+        )
+    else:
+        next_match = find_next_pending_match(matching_sets)
     if next_match is None:
+        if opponent is not None:
+            return {"error": f"No pending set found between you and {opponent.display_name} in {active_event['event_name']}."}
         return {"error": f"No pending sets found for you in {active_event['event_name']}."}
 
     return {
@@ -890,6 +916,13 @@ def find_next_pending_match(matches: list[dict]) -> dict | None:
             get_set_id_sort_key(match["set"]),
         ),
     )[0]
+
+
+def find_next_pending_match_against_player(matches: list[dict], opponent_player_id: int) -> dict | None:
+    return find_next_pending_match([
+        match for match in matches
+        if set_has_player(match["set"], opponent_player_id)
+    ])
 
 
 def is_pending_set(set_data: dict) -> bool:

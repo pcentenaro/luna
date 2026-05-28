@@ -219,55 +219,6 @@ class StartGGClient:
         )
         return data.get("set")
 
-    async def get_set_inspection(self, set_id: int) -> dict | None:
-        data = await self.query(
-            """
-            query SetInspection($setId: ID!) {
-              set(id: $setId) {
-                id
-                fullRoundText
-                round
-                state
-                winnerId
-                slots {
-                  standing {
-                    placement
-                    stats {
-                      score {
-                        value
-                      }
-                    }
-                  }
-                  entrant {
-                    id
-                    name
-                    participants {
-                      id
-                      gamerTag
-                      player {
-                        id
-                      }
-                    }
-                  }
-                }
-                games {
-                  id
-                  state
-                  winnerId
-                  selections {
-                    entrant {
-                      id
-                      name
-                    }
-                  }
-                }
-              }
-            }
-            """,
-            {"setId": set_id},
-        )
-        return data.get("set")
-
     async def report_set(
         self,
         set_id: int,

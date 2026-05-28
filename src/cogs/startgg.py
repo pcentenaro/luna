@@ -1024,8 +1024,14 @@ def build_report_payload(set_data: dict, winner_player_id: int, score: tuple[int
         return {"error": "The selected winner is not part of this set."}
     loser_slot = slots[0] if slots[1] == winner_slot else slots[1]
     winner_score, loser_score = sorted(score, reverse=True)
-    if winner_score != 7:
-        return {"error": "Puyo scores must have the winner at 7 points."}
+    required_winner_score = get_required_winner_score(set_data)
+    if winner_score != required_winner_score:
+        return {
+            "error": (
+                "Invalid score for this round. "
+                f"{get_set_round_label(set_data)} requires the winner to reach {required_winner_score} points."
+            )
+        }
     winner_entrant = winner_slot["entrant"]
     loser_entrant = loser_slot["entrant"]
     game_data = build_game_data_for_set_score(
@@ -1044,6 +1050,19 @@ def build_report_payload(set_data: dict, winner_player_id: int, score: tuple[int
         "loser_score": loser_score,
         "game_data": game_data,
     }
+
+
+def get_required_winner_score(set_data: dict) -> int:
+    round_text = normalize_lookup_text(get_set_round_label(set_data))
+    if "grand final" in round_text:
+        return 10
+    if round_text in {"winners final", "losers final"}:
+        return 9
+    return 7
+
+
+def get_set_round_label(set_data: dict) -> str:
+    return set_data.get("fullRoundText") or f"Round {set_data.get('round')}"
 
 
 def build_game_data_for_set_score(

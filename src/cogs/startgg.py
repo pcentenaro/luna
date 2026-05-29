@@ -101,7 +101,7 @@ class Startgg(commands.Cog):
             phase_state = min([group["state"] for group in phase_groups]) if phase_groups else None
             fields = [
                 discord.EmbedField("phase", f"[{phase["name"]}](https://www.start.gg/{active_event["event_slug"]}/brackets/{phase["id"]})", True),
-                discord.EmbedField("brackets", len(phase_groups), True),
+                discord.EmbedField("brackets", build_phase_group_links(active_event, phase, phase_groups), True),
                 discord.EmbedField("status", phase_states_dict.get(phase_state, "unknown"), True)
             ]
             embed_fields.extend(fields)
@@ -429,6 +429,22 @@ phase_states_dict = {
         6: "called",
         7: "queue"
     }
+
+
+def build_phase_group_links(active_event: dict, phase: dict, phase_groups: list[dict]) -> str:
+    if not phase_groups:
+        return "None"
+
+    links = []
+    for phase_group in phase_groups:
+        label = phase_group.get("displayIdentifier") or str(phase_group["id"])
+        url = (
+            f"https://www.start.gg/{active_event['event_slug']}"
+            f"/brackets/{phase['id']}/{phase_group['id']}"
+        )
+        links.append(f"[{label}]({url})")
+
+    return ", ".join(links)
 
 
 pending_report_user_ids_by_set: dict[int, set[int]] = {}

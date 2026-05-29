@@ -22,7 +22,9 @@ class Startgg(commands.Cog):
 
         async def on_timeout(self):
             self.disable_all_items()
-            await self.message.edit(view=None)
+            message = getattr(self, "message", None)
+            if message:
+                await message.edit(view=None)
 
         @discord.ui.button(
             label= "Unlink account",
@@ -35,6 +37,17 @@ class Startgg(commands.Cog):
             await interaction.response.send_message("Account successfully unlinked.")
             await self.on_timeout()
 
+    @discord.slash_command(
+            name="link",
+            description="Link your Discord account to a start.gg profile"
+    )
+    async def link(self, ctx: discord.ApplicationContext):
+        if config.startgg_client is None:
+            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+            return
+
+        await ctx.send_modal(LinkStartggAccountModal(ctx.author.id))
+
 
     @startgg.command(
             name="account",
@@ -43,36 +56,11 @@ class Startgg(commands.Cog):
     async def account(self, ctx: discord.ApplicationContext):
         account_info = config.link_store.get_startgg_link(ctx.user.id)
         if account_info is None:
-            interaction = await ctx.respond("You don't have an account linked to smash.gg. To link an account, reply to this message with your [smash.gg](<https://www.start.gg/>) account ID.")
-            bot_message = await interaction.original_response()
-            same_user_reply = lambda m: m.reference is not None and ctx.user.id == m.author.id and bot_message.id == m.reference.message_id
-            try:
-                user_reply = await config.bot.wait_for(
-                    event="message",
-                    check=same_user_reply,
-                    timeout=300
-                )
-                player_id = user_reply.content
-                try:
-                    player = await find_startgg_player(player_id)
-                except StartGGError as error:
-                    await ctx.respond(f"Could not verify that start.gg profile: {error}", ephemeral=True)
-                    return
-                if player is None:
-                    await ctx.respond("No start.gg player was found with that ID or profile code.", ephemeral=True)
-                    return
-                config.link_store.set_startgg_link(
-                    discord_user_id=ctx.author.id,
-                    startgg_player_id=int(player["id"]),
-                    gamer_tag=player.get("gamerTag"),
-                    prefix=player.get("prefix")
-                )
-                account_info = config.link_store.get_startgg_link(ctx.user.id)
-            except TimeoutError:
-                await bot_message.edit(content="You took too long to reply with your [smash.gg](<https://www.start.gg/>) ID. If you want to link your account, use `/startgg account` again.")
-                return
+            await ctx.respond("You don't have a start.gg account linked yet. Use `/link` to connect one.", ephemeral=True)
+            return
+
         account_embed = discord.Embed(
-                title=f"smash.gg account for {ctx.user.display_name}",
+                title=f"start.gg account for {ctx.user.display_name}",
                 thumbnail=ctx.user.display_avatar.url,
                 fields=[
                     discord.EmbedField("account name", account_info["startgg_gamer_tag"], inline=True),
@@ -80,14 +68,16 @@ class Startgg(commands.Cog):
                     discord.EmbedField("updated on", str(datetime.fromisoformat(account_info["updated_at"]).date()), inline=True)
                 ]
             )
-        await ctx.respond(
+        view = self.AccountCommandUnlinkAccountView(ctx.user.id, timeout=30)
+        response = await ctx.respond(
             embed=account_embed,
-            view=self.AccountCommandUnlinkAccountView(ctx.user.id, timeout=30)
+            view=view
         )
+        view.message = await response.original_response()
         return
 
 
-    @startgg.command(
+    @discord.slash_command(
             name="event",
             description="Display information about the current start.gg event"
     )
@@ -102,23 +92,23 @@ class Startgg(commands.Cog):
         except StartGGError as error:
             await ctx.respond(f"Could not read start.gg phases: {error}", ephemeral=True)
             return
-        if not phases:
-            await ctx.respond(f"No phases found for {active_event['event_name']}.", ephemeral=True)
-            return
-        embed_fields = []
+        event_url = f"https://www.start.gg/{active_event['event_slug']}"
+        embed_fields = [
+            discord.EmbedField("event link", event_url, False)
+        ]
         for phase in phases:
             phase_groups = await config.startgg_client.get_phase_groups(phase["id"])
-            phase_state = min([group["state"] for group in phase_groups])
+            phase_state = min([group["state"] for group in phase_groups]) if phase_groups else None
             fields = [
                 discord.EmbedField("phase", f"[{phase["name"]}](https://www.start.gg/{active_event["event_slug"]}/brackets/{phase["id"]})", True),
                 discord.EmbedField("brackets", len(phase_groups), True),
-                discord.EmbedField("status", phase_states_dict[phase_state], True)
+                discord.EmbedField("status", phase_states_dict.get(phase_state, "unknown"), True)
             ]
             embed_fields.extend(fields)
         general_info_embed = discord.Embed(
             title=active_event["event_name"],
             description="**General information**",
-            url=f"https://www.start.gg/{active_event["event_slug"]}",
+            url=event_url,
             fields=embed_fields
         )
         await ctx.respond(embed=general_info_embed)
@@ -160,7 +150,7 @@ class Startgg(commands.Cog):
         )
 
 
-    @startgg.command(
+    @discord.slash_command(
             name="sets",
             description="List sets by phase group ID, phase name, or your linked player"
     )
@@ -736,6 +726,52 @@ class DQReportModal(discord.ui.Modal):
                 view=self.report_view,
             )
         await interaction.followup.send("DQ reported.", ephemeral=True)
+
+
+class LinkStartggAccountModal(discord.ui.Modal):
+    def __init__(self, user_id: int):
+        super().__init__(title="Link start.gg account")
+        self.user_id = user_id
+        self.add_item(
+            discord.ui.InputText(
+                label="Player ID or profile code",
+                placeholder="74b6cc6d or https://www.start.gg/user/74b6cc6d",
+                required=True,
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who opened this modal can link this account.", ephemeral=True)
+            return
+
+        if config.startgg_client is None:
+            await interaction.response.send_message("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+            return
+
+        player_reference = self.children[0].value
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            player = await find_startgg_player(player_reference)
+        except StartGGError as error:
+            await interaction.followup.send(f"Could not verify that start.gg profile: {error}", ephemeral=True)
+            return
+
+        if player is None:
+            await interaction.followup.send("No start.gg player was found with that ID or profile code.", ephemeral=True)
+            return
+
+        config.link_store.set_startgg_link(
+            discord_user_id=interaction.user.id,
+            startgg_player_id=int(player["id"]),
+            gamer_tag=player.get("gamerTag"),
+            prefix=player.get("prefix"),
+        )
+        await interaction.followup.send(
+            f"Linked your Discord account to {format_startgg_player(player)}.",
+            ephemeral=True,
+        )
 
 
 async def send_admin_ping_with_cooldown(view, interaction: discord.Interaction):

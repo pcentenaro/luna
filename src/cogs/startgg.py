@@ -1,6 +1,8 @@
+import asyncio
 import config
 import discord
 from datetime import datetime
+from datetime import timezone
 from discord.ext import commands
 from startgg import StartGGClient, StartGGError
 
@@ -275,24 +277,23 @@ class Startgg(commands.Cog):
                 return
         await ctx.respond(report_preview["message"], ephemeral=True)
 
-
     @discord.slash_command(
             name="report",
             description="Report your next pending start.gg set"
     )
-    async def report(self, ctx: discord.ApplicationContext, score: str):
+    async def report(
+        self,
+        ctx: discord.ApplicationContext,
+        score: str,
+        opponent: discord.Member = discord.Option(
+            discord.Member,
+            description="Optional opponent if you are not reporting your next set",
+            required=False,
+            default=None,
+        ),
+    ):
         if config.startgg_client is None:
             await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
-            return
-
-        active_event = config.config_store.get_active_event()
-        if active_event is None:
-            await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
-            return
-
-        link = config.link_store.get_startgg_link(ctx.author.id)
-        if link is None:
-            await ctx.respond("You do not have a start.gg link yet. // No estás vinculado a start.gg aún.", ephemeral=True)
             return
 
         parsed_score = parse_score(score)
@@ -302,46 +303,127 @@ class Startgg(commands.Cog):
 
         await ctx.defer()
         try:
-            matching_sets = await find_sets_for_player(
-                event_id=active_event["event_id"],
+            report_context = await get_next_report_context(ctx, opponent)
+            if report_context["error"]:
+                await ctx.respond(report_context["error"], ephemeral=True)
+                return
+
+            active_event = report_context["active_event"]
+            link = report_context["link"]
+            next_match = report_context["match"]
+            report = build_player_report_payload(
+                set_data=next_match["set"],
                 player_id=link["startgg_player_id"],
+                score=parsed_score,
             )
-        except StartGGError as error:
-            await ctx.respond(f"Could not read your start.gg sets: {error}", ephemeral=True)
-            return
+            if report["error"]:
+                await ctx.respond(report["error"], ephemeral=True)
+                return
 
-        next_match = find_next_pending_match(matching_sets)
-        if next_match is None:
-            await ctx.respond(f"No pending sets found for you in {active_event['event_name']}.", ephemeral=True)
-            return
+            opponent_link = config.link_store.get_startgg_link_by_player_id(report["opponent_player_id"])
+            if opponent_link is None:
+                await ctx.respond("Your opponent must link their start.gg profile before this result can be confirmed.", ephemeral=True)
+                return
 
-        report = build_player_report_payload(
-            set_data=next_match["set"],
-            player_id=link["startgg_player_id"],
-            score=parsed_score,
-        )
-        if report["error"]:
-            await ctx.respond(report["error"], ephemeral=True)
-            return
-
-        opponent_link = config.link_store.get_startgg_link_by_player_id(report["opponent_player_id"])
-        if opponent_link is None:
-            await ctx.respond("Your opponent must link their start.gg profile before this result can be confirmed.", ephemeral=True)
-            return
-
-        view = ReportConfirmationView(
-            match=next_match,
-            report=report,
-            active_event=active_event,
-            player_discord_ids={
+            set_id = int(next_match["set"]["id"])
+            player_discord_ids = {
                 int(link["discord_user_id"]),
                 int(opponent_link["discord_user_id"]),
-            },
-        )
-        await ctx.respond(
-            build_player_report_confirmation_message(next_match, report),
-            view=view,
-        )
+            }
+            pending_report_message = get_pending_report_message(set_id, player_discord_ids)
+            if pending_report_message:
+                await ctx.respond(pending_report_message)
+                return
+
+            register_pending_report(set_id, player_discord_ids)
+            view = ReportConfirmationView(
+                match=next_match,
+                report=report,
+                active_event=active_event,
+                player_discord_ids=player_discord_ids,
+            )
+            try:
+                await ctx.respond(
+                    build_player_report_confirmation_message(next_match, report),
+                    view=view,
+                )
+            except Exception:
+                release_pending_report(set_id, player_discord_ids)
+                raise
+        except asyncio.TimeoutError:
+            await ctx.respond("Reading your start.gg sets took too long. Try again in a moment.", ephemeral=True)
+        except StartGGError as error:
+            await ctx.respond(f"Could not read your start.gg sets: {error}", ephemeral=True)
+        except Exception as error:
+            await ctx.respond(f"Could not prepare the report panel: {error}", ephemeral=True)
+            raise
+
+
+    @discord.slash_command(
+            name="dq",
+            description="Request admin help or DQ for your next pending set"
+    )
+    async def dq(self, ctx: discord.ApplicationContext):
+        if config.startgg_client is None:
+            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+            return
+
+        await ctx.defer()
+        try:
+            report_context = await get_next_report_context(ctx)
+            if report_context["error"]:
+                await ctx.respond(report_context["error"], ephemeral=True)
+                return
+
+            active_event = report_context["active_event"]
+            link = report_context["link"]
+            next_match = report_context["match"]
+            opponent_slot = find_opponent_slot_by_player_id(next_match["set"], link["startgg_player_id"])
+            if opponent_slot is None:
+                await ctx.respond("This set does not have an opponent yet.", ephemeral=True)
+                return
+
+            opponent_player_id = get_slot_player_id(opponent_slot)
+            if opponent_player_id is None:
+                await ctx.respond("Could not find your opponent's start.gg player ID.", ephemeral=True)
+                return
+
+            opponent_link = config.link_store.get_startgg_link_by_player_id(opponent_player_id)
+            if opponent_link is None:
+                await ctx.respond("Your opponent must link their start.gg profile before DQ can be handled here.", ephemeral=True)
+                return
+
+            set_id = int(next_match["set"]["id"])
+            player_discord_ids = {
+                int(link["discord_user_id"]),
+                int(opponent_link["discord_user_id"]),
+            }
+            pending_report_message = get_pending_report_message(set_id, player_discord_ids)
+            if pending_report_message:
+                await ctx.respond(pending_report_message)
+                return
+
+            register_pending_report(set_id, player_discord_ids)
+            view = DQRequestView(
+                match=next_match,
+                active_event=active_event,
+                player_discord_ids=player_discord_ids,
+            )
+            try:
+                await ctx.respond(
+                    build_dq_request_message(next_match),
+                    view=view,
+                )
+            except Exception:
+                release_pending_report(set_id, player_discord_ids)
+                raise
+        except asyncio.TimeoutError:
+            await ctx.respond("Reading your start.gg sets took too long. Try again in a moment.", ephemeral=True)
+        except StartGGError as error:
+            await ctx.respond(f"Could not read your start.gg sets: {error}", ephemeral=True)
+        except Exception as error:
+            await ctx.respond(f"Could not prepare the DQ panel: {error}", ephemeral=True)
+            raise
 
 
 def setup(bot):
@@ -357,6 +439,10 @@ phase_states_dict = {
         6: "called",
         7: "queue"
     }
+
+
+pending_report_user_ids_by_set: dict[int, set[int]] = {}
+pending_report_set_id_by_user: dict[int, int] = {}
 
 
 class SetsInfoView(discord.ui.View):
@@ -444,6 +530,8 @@ class ReportConfirmationView(discord.ui.View):
         self.player_discord_ids = player_discord_ids
         self.confirmed_user_ids = set()
         self.finished = False
+        self.message = None
+        self.last_admin_ping_at = None
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -473,12 +561,14 @@ class ReportConfirmationView(discord.ui.View):
                 game_data=self.report["game_data"],
             )
         except StartGGError as error:
+            release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
             await interaction.message.edit(
                 content=f"Could not report start.gg set: {error}",
                 view=self,
             )
             return
 
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
         await interaction.message.edit(
             content=build_player_report_success_message(self.match, self.report, self.active_event),
             view=self,
@@ -491,10 +581,28 @@ class ReportConfirmationView(discord.ui.View):
 
         self.finished = True
         self.disable_all_items()
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
         await interaction.response.edit_message(
             content="Result report cancelled. Run `/report` again when both players are ready.",
             view=self,
         )
+
+    @discord.ui.button(label="Ping Admin", style=discord.ButtonStyle.secondary)
+    async def admin_dq(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self.finished:
+            await interaction.response.send_message("This report confirmation is already closed.", ephemeral=True)
+            return
+
+        if is_luna_admin_interaction(interaction):
+            self.message = interaction.message
+            await interaction.response.send_modal(DQReportModal(self))
+            return
+
+        if interaction.user.id in self.player_discord_ids:
+            await send_admin_ping_with_cooldown(self, interaction)
+            return
+
+        await interaction.response.send_message("Only players in this set or Luna admins can use this button.", ephemeral=True)
 
     async def can_use_button(self, interaction: discord.Interaction) -> bool:
         if self.finished:
@@ -510,6 +618,215 @@ class ReportConfirmationView(discord.ui.View):
     async def on_timeout(self):
         self.finished = True
         self.disable_all_items()
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+
+
+class DQRequestView(discord.ui.View):
+    def __init__(
+        self,
+        match: dict,
+        active_event: dict,
+        player_discord_ids: set[int],
+    ):
+        super().__init__(timeout=600)
+        self.match = match
+        self.active_event = active_event
+        self.player_discord_ids = player_discord_ids
+        self.finished = False
+        self.message = None
+        self.last_admin_ping_at = None
+
+    @discord.ui.button(label="Ping Admin", style=discord.ButtonStyle.secondary)
+    async def ping_admin(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self.finished:
+            await interaction.response.send_message("This DQ request is already closed.", ephemeral=True)
+            return
+
+        if interaction.user.id not in self.player_discord_ids and not is_luna_admin_interaction(interaction):
+            await interaction.response.send_message("Only players in this set or Luna admins can use this button.", ephemeral=True)
+            return
+
+        await send_admin_ping_with_cooldown(self, interaction)
+
+    @discord.ui.button(label="Admin DQ", style=discord.ButtonStyle.danger)
+    async def admin_dq(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self.finished:
+            await interaction.response.send_message("This DQ request is already closed.", ephemeral=True)
+            return
+
+        if not is_luna_admin_interaction(interaction):
+            await interaction.response.send_message("Only Luna admins can report DQs.", ephemeral=True)
+            return
+
+        self.message = interaction.message
+        await interaction.response.send_modal(DQReportModal(self))
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self.finished:
+            await interaction.response.send_message("This DQ request is already closed.", ephemeral=True)
+            return
+
+        if interaction.user.id not in self.player_discord_ids and not is_luna_admin_interaction(interaction):
+            await interaction.response.send_message("Only players in this set or Luna admins can cancel this DQ request.", ephemeral=True)
+            return
+
+        self.finished = True
+        self.disable_all_items()
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+        await interaction.response.edit_message(
+            content="DQ request cancelled. Run `/dq` again if admin help is needed.",
+            view=self,
+        )
+
+    async def on_timeout(self):
+        self.finished = True
+        self.disable_all_items()
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+
+
+class DQReportModal(discord.ui.Modal):
+    def __init__(self, report_view):
+        super().__init__(title="Report DQ")
+        self.report_view = report_view
+        self.add_item(
+            discord.ui.InputText(
+                label="DQ player",
+                placeholder="1, 2, entrant ID, or exact player name",
+                required=True,
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin_interaction(interaction):
+            await interaction.response.send_message("Only Luna admins can report DQs.", ephemeral=True)
+            return
+
+        dq_slot = find_dq_slot(self.report_view.match["set"], self.children[0].value)
+        if dq_slot is None:
+            await interaction.response.send_message("Could not find that player in this set.", ephemeral=True)
+            return
+
+        dq_report = build_dq_report_payload(self.report_view.match["set"], dq_slot)
+        if dq_report["error"]:
+            await interaction.response.send_message(dq_report["error"], ephemeral=True)
+            return
+
+        self.report_view.finished = True
+        self.report_view.disable_all_items()
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            await config.startgg_client.report_set(
+                set_id=int(self.report_view.match["set"]["id"]),
+                winner_id=dq_report["winner_entrant_id"],
+                is_dq=True,
+                game_data=None,
+            )
+        except StartGGError as error:
+            release_pending_report(int(self.report_view.match["set"]["id"]), self.report_view.player_discord_ids)
+            await interaction.followup.send(f"Could not report DQ to start.gg: {error}", ephemeral=True)
+            return
+
+        release_pending_report(int(self.report_view.match["set"]["id"]), self.report_view.player_discord_ids)
+        message = self.report_view.message
+        if message:
+            await message.edit(
+                content=build_dq_report_success_message(self.report_view.match, dq_report, self.report_view.active_event),
+                view=self.report_view,
+            )
+        await interaction.followup.send("DQ reported.", ephemeral=True)
+
+
+async def send_admin_ping_with_cooldown(view, interaction: discord.Interaction):
+    now = datetime.now(timezone.utc)
+    if view.last_admin_ping_at is not None:
+        elapsed_seconds = (now - view.last_admin_ping_at).total_seconds()
+        if elapsed_seconds < 15:
+            retry_after = int(15 - elapsed_seconds) + 1
+            await interaction.response.send_message(
+                f"Admin ping is on cooldown. Try again in {retry_after} second(s).",
+                ephemeral=True,
+            )
+            return
+
+    view.last_admin_ping_at = now
+    await interaction.response.send_message(
+        build_admin_help_message(view.match),
+        allowed_mentions=discord.AllowedMentions(roles=True),
+    )
+
+
+def get_pending_report_message(set_id: int, player_discord_ids: set[int]) -> str | None:
+    if set_id in pending_report_user_ids_by_set:
+        return "There is already a pending report confirmation for this set."
+
+    for player_discord_id in player_discord_ids:
+        pending_set_id = pending_report_set_id_by_user.get(player_discord_id)
+        if pending_set_id is not None:
+            return (
+                "One of the players already has a pending report confirmation. "
+                "Confirm or cancel that report before creating another one."
+            )
+
+    return None
+
+
+def register_pending_report(set_id: int, player_discord_ids: set[int]):
+    pending_report_user_ids_by_set[set_id] = set(player_discord_ids)
+    for player_discord_id in player_discord_ids:
+        pending_report_set_id_by_user[player_discord_id] = set_id
+
+
+def release_pending_report(set_id: int, player_discord_ids: set[int]):
+    pending_report_user_ids_by_set.pop(set_id, None)
+    for player_discord_id in player_discord_ids:
+        if pending_report_set_id_by_user.get(player_discord_id) == set_id:
+            pending_report_set_id_by_user.pop(player_discord_id, None)
+
+
+async def get_next_report_context(ctx: discord.ApplicationContext, opponent: discord.Member | None = None) -> dict:
+    active_event = config.config_store.get_active_event()
+    if active_event is None:
+        return {"error": "No active start.gg event is configured yet. // Aún no hay evento activo configurado."}
+
+    link = config.link_store.get_startgg_link(ctx.author.id)
+    if link is None:
+        return {"error": "You do not have a start.gg link yet. // No estás vinculado a start.gg aún."}
+
+    opponent_link = None
+    if opponent is not None:
+        if opponent.id == ctx.author.id:
+            return {"error": "You cannot report a set against yourself."}
+        opponent_link = config.link_store.get_startgg_link(opponent.id)
+        if opponent_link is None:
+            return {"error": "That opponent does not have a start.gg link yet."}
+
+    matching_sets = await asyncio.wait_for(
+        find_sets_for_player(
+            event_id=active_event["event_id"],
+            player_id=link["startgg_player_id"],
+        ),
+        timeout=20,
+    )
+    if opponent_link is not None:
+        next_match = find_next_pending_match_against_player(
+            matching_sets,
+            opponent_link["startgg_player_id"],
+        )
+    else:
+        next_match = find_next_pending_match(matching_sets)
+    if next_match is None:
+        if opponent is not None:
+            return {"error": f"No pending set found between you and {opponent.display_name} in {active_event['event_name']}."}
+        return {"error": f"No pending sets found for you in {active_event['event_name']}."}
+
+    return {
+        "error": None,
+        "active_event": active_event,
+        "link": link,
+        "match": next_match,
+    }
 
 
 def format_startgg_player(player: dict) -> str:
@@ -533,10 +850,20 @@ def format_stored_startgg_player(link: dict) -> str:
 
 
 def is_luna_admin(ctx: discord.ApplicationContext) -> bool:
+    return is_luna_admin_user(ctx.guild, ctx.author)
+
+
+def is_luna_admin_interaction(interaction: discord.Interaction) -> bool:
+    return is_luna_admin_user(interaction.guild, interaction.user)
+
+
+def is_luna_admin_user(guild: discord.Guild | None, user: discord.Member) -> bool:
     admin_role_id = config.config_store.get_admin_role_id()
     if admin_role_id is None:
-        return bool(ctx.author.guild_permissions.administrator)
-    return any(role.id == admin_role_id for role in ctx.author.roles)
+        return bool(user.guild_permissions.administrator)
+    if guild and guild.get_role(admin_role_id) is None:
+        return bool(user.guild_permissions.administrator)
+    return any(role.id == admin_role_id for role in user.roles)
 
 
 async def find_sets_for_player(event_id: int, player_id: int) -> list[dict]:
@@ -583,7 +910,7 @@ def sort_set_matches(matches: list[dict]) -> list[dict]:
             str(match["phase"].get("name") or ""),
             str(match["phase_group"].get("displayIdentifier") or ""),
             get_set_round(match["set"]),
-            int(match["set"].get("id") or 0),
+            get_set_id_sort_key(match["set"]),
         ),
     )
 
@@ -591,7 +918,7 @@ def sort_set_matches(matches: list[dict]) -> list[dict]:
 def find_next_pending_match(matches: list[dict]) -> dict | None:
     pending_matches = [
         match for match in matches
-        if is_pending_set(match["set"]) and has_two_entrants(match["set"])
+        if is_reportable_set(match["set"])
     ]
     if not pending_matches:
         return None
@@ -602,14 +929,29 @@ def find_next_pending_match(matches: list[dict]) -> dict | None:
             get_set_round(match["set"]),
             str(match["phase"].get("name") or ""),
             str(match["phase_group"].get("displayIdentifier") or ""),
-            int(match["set"].get("id") or 0),
+            get_set_id_sort_key(match["set"]),
         ),
     )[0]
+
+
+def find_next_pending_match_against_player(matches: list[dict], opponent_player_id: int) -> dict | None:
+    return find_next_pending_match([
+        match for match in matches
+        if set_has_player(match["set"], opponent_player_id)
+    ])
 
 
 def is_pending_set(set_data: dict) -> bool:
     state = set_data.get("state")
     return str(state).casefold() not in {"3", "completed"}
+
+
+def is_reportable_set(set_data: dict) -> bool:
+    return is_pending_set(set_data) and has_two_entrants(set_data) and is_real_set_id(set_data)
+
+
+def is_real_set_id(set_data: dict) -> bool:
+    return str(set_data.get("id") or "").isdigit()
 
 
 def has_two_entrants(set_data: dict) -> bool:
@@ -621,6 +963,11 @@ def get_set_round(set_data: dict) -> int:
         return int(set_data.get("round"))
     except (TypeError, ValueError):
         return 999999
+
+
+def get_set_id_sort_key(set_data: dict) -> tuple[int, str]:
+    set_id = str(set_data.get("id") or "")
+    return (0, set_id.zfill(20)) if set_id.isdigit() else (1, set_id)
 
 
 def build_player_report_payload(set_data: dict, player_id: int, score: tuple[int, int]) -> dict:
@@ -658,6 +1005,13 @@ def find_opponent_slot(set_data: dict, player_slot: dict) -> dict | None:
         if slot.get("entrant") and slot != player_slot:
             return slot
     return None
+
+
+def find_opponent_slot_by_player_id(set_data: dict, player_id: int) -> dict | None:
+    player_slot = find_slot_by_player_id(set_data.get("slots") or [], player_id)
+    if player_slot is None:
+        return None
+    return find_opponent_slot(set_data, player_slot)
 
 
 def get_slot_player_id(slot: dict) -> int | None:
@@ -700,6 +1054,77 @@ def build_player_report_confirmation_message(match: dict, report: dict, confirme
         "Seleccionen ✅ para confirmar o ❌ para cancelar.\n"
         f"Confirmaciones: {confirmed_count}/2"
     )
+
+
+def build_admin_help_message(match: dict) -> str:
+    admin_role_id = config.config_store.get_admin_role_id()
+    admin_mention = f"<@&{admin_role_id}>" if admin_role_id else "Luna admins"
+    return (
+        f"{admin_mention} help requested for this set.\n"
+        f"{format_match_card(match)}"
+    )
+
+
+def build_dq_request_message(match: dict) -> str:
+    return (
+        "DQ/admin help requested for this set.\n"
+        f"{format_match_card(match)}\n\n"
+        "Admins can use `Admin DQ` to choose who receives the DQ."
+    )
+
+
+def build_dq_report_payload(set_data: dict, dq_slot: dict) -> dict:
+    slots = [slot for slot in set_data.get("slots") or [] if slot.get("entrant")]
+    if len(slots) != 2:
+        return {"error": "This set does not have exactly two entrants yet."}
+    if dq_slot not in slots:
+        return {"error": "The selected DQ player is not part of this set."}
+
+    winner_slot = slots[0] if slots[1] == dq_slot else slots[1]
+    dq_entrant = dq_slot["entrant"]
+    winner_entrant = winner_slot["entrant"]
+    return {
+        "error": None,
+        "winner_entrant_id": int(winner_entrant["id"]),
+        "winner_name": winner_entrant["name"],
+        "dq_entrant_id": int(dq_entrant["id"]),
+        "dq_name": dq_entrant["name"],
+    }
+
+
+def build_dq_report_success_message(match: dict, dq_report: dict, active_event: dict) -> str:
+    set_data = match["set"]
+    phase = match["phase"]
+    phase_group = match["phase_group"]
+    phase_group_label = phase_group.get("displayIdentifier") or phase_group["id"]
+    round_text = set_data.get("fullRoundText") or f"Round {set_data.get('round')}"
+    return (
+        f"DQ reported for {active_event['event_name']}.\n"
+        f"{phase['name']} - Group {phase_group_label} | {round_text}\n"
+        f"Set ID: {set_data['id']}\n"
+        f"Winner: {dq_report['winner_name']}\n"
+        f"DQ: {dq_report['dq_name']}"
+    )
+
+
+def find_dq_slot(set_data: dict, value: str) -> dict | None:
+    value = value.strip()
+    slots = [slot for slot in set_data.get("slots") or [] if slot.get("entrant")]
+    if value in {"1", "2"}:
+        slot_index = int(value) - 1
+        return slots[slot_index] if slot_index < len(slots) else None
+
+    normalized_value = normalize_lookup_text(value)
+    matches = []
+    for slot in slots:
+        entrant = slot["entrant"]
+        if str(entrant.get("id")) == value:
+            matches.append(slot)
+            continue
+        if normalize_lookup_text(entrant.get("name") or "") == normalized_value:
+            matches.append(slot)
+
+    return matches[0] if len(matches) == 1 else None
 
 
 def build_next_set_embed(active_event: dict, link: dict | None, player_matches: list[dict]) -> discord.Embed:
@@ -976,8 +1401,14 @@ def build_report_payload(set_data: dict, winner_player_id: int, score: tuple[int
         return {"error": "The selected winner is not part of this set."}
     loser_slot = slots[0] if slots[1] == winner_slot else slots[1]
     winner_score, loser_score = sorted(score, reverse=True)
-    if winner_score != 7:
-        return {"error": "Puyo scores must have the winner at 7 points."}
+    required_winner_score = get_required_winner_score(set_data)
+    if winner_score != required_winner_score:
+        return {
+            "error": (
+                "Invalid score for this round. "
+                f"{get_set_round_label(set_data)} requires the winner to reach {required_winner_score} points."
+            )
+        }
     winner_entrant = winner_slot["entrant"]
     loser_entrant = loser_slot["entrant"]
     game_data = build_game_data_for_set_score(
@@ -996,6 +1427,19 @@ def build_report_payload(set_data: dict, winner_player_id: int, score: tuple[int
         "loser_score": loser_score,
         "game_data": game_data,
     }
+
+
+def get_required_winner_score(set_data: dict) -> int:
+    round_text = normalize_lookup_text(get_set_round_label(set_data))
+    if "grand final" in round_text:
+        return 10
+    if round_text in {"winners final", "losers final"}:
+        return 9
+    return 7
+
+
+def get_set_round_label(set_data: dict) -> str:
+    return set_data.get("fullRoundText") or f"Round {set_data.get('round')}"
 
 
 def build_game_data_for_set_score(

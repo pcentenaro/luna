@@ -223,12 +223,13 @@ class StartGGClient:
         self,
         set_id: int,
         winner_id: int,
+        is_dq: bool = False,
         game_data: list[dict] | None = None,
     ) -> dict | None:
         data = await self.query(
             """
-            mutation ReportSet($setId: ID!, $winnerId: ID!, $gameData: [BracketSetGameDataInput]) {
-              reportBracketSet(setId: $setId, winnerId: $winnerId, gameData: $gameData) {
+            mutation ReportSet($setId: ID!, $winnerId: ID!, $isDQ: Boolean, $gameData: [BracketSetGameDataInput]) {
+              reportBracketSet(setId: $setId, winnerId: $winnerId, isDQ: $isDQ, gameData: $gameData) {
                 id
                 state
               }
@@ -237,6 +238,7 @@ class StartGGClient:
             {
                 "setId": set_id,
                 "winnerId": winner_id,
+                "isDQ": is_dq,
                 "gameData": game_data,
             },
         )

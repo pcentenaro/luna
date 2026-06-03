@@ -184,22 +184,35 @@ class SetAdminRoleModal(discord.ui.Modal):
 
 
 async def refresh_admin_panel_response(interaction: discord.Interaction):
-    if interaction.message:
+    if not interaction.message:
+        await interaction.response.defer(ephemeral=True)
+        return False
+
+    try:
         await interaction.response.edit_message(
             embed=build_admin_panel_embed(interaction.guild),
             view=AdminPanelView(),
         )
-        return
+    except (discord.Forbidden, discord.NotFound):
+        await interaction.response.defer(ephemeral=True)
+        return False
 
-    await interaction.response.defer(ephemeral=True)
+    return True
 
 
 async def refresh_admin_panel(interaction: discord.Interaction):
-    if interaction.message:
+    if not interaction.message:
+        return False
+
+    try:
         await interaction.message.edit(
             embed=build_admin_panel_embed(interaction.guild),
             view=AdminPanelView(),
         )
+    except (discord.Forbidden, discord.NotFound):
+        return False
+
+    return True
 
 
 def is_luna_admin(interaction: discord.Interaction) -> bool:

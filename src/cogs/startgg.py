@@ -1021,9 +1021,11 @@ def build_ready_match_ping_message(match: dict) -> str:
             player_mentions.append(f"<@{link['discord_user_id']}>")
 
     mentions = " ".join(player_mentions)
+    required_winner_score = get_required_winner_score(match["set"])
     return (
         f"{mentions} you are ready to play.\n"
         f"{format_match_card(match)}\n"
+        f"Report score target: first to {required_winner_score}.\n"
         "Use `/report` after the set is finished."
     )
 

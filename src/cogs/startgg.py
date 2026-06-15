@@ -284,8 +284,9 @@ class Startgg(commands.Cog):
             )
             try:
                 await ctx.respond(
-                    build_player_report_confirmation_message(next_match, report),
+                    build_player_report_panel_message(next_match, report, player_discord_ids),
                     view=view,
+                    allowed_mentions=discord.AllowedMentions(users=True),
                 )
             except Exception:
                 release_pending_report(set_id, player_discord_ids)
@@ -1382,6 +1383,17 @@ def build_player_report_confirmation_message(match: dict, report: dict, confirme
         "Seleccionen ✅ para confirmar o ❌ para cancelar.\n"
         f"Confirmaciones: {confirmed_count}/2"
     )
+
+
+def build_player_report_panel_message(match: dict, report: dict, player_discord_ids: set[int]) -> str:
+    return (
+        f"{format_user_mentions(player_discord_ids)}\n"
+        f"{build_player_report_confirmation_message(match, report)}"
+    )
+
+
+def format_user_mentions(user_ids: set[int]) -> str:
+    return " ".join(f"<@{user_id}>" for user_id in sorted(user_ids))
 
 
 def build_admin_help_message(match: dict) -> str:

@@ -5,6 +5,11 @@ from pathlib import Path
 
 DEFAULT_LINKS_PATH = Path(__file__).resolve().parent.parent / "data" / "links.json"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "config.json"
+DEFAULT_SCORE_TARGETS = {
+    "default": 7,
+    "final": 9,
+    "grand_final": 10,
+}
 
 
 class LinkStore:
@@ -114,6 +119,23 @@ class ConfigStore:
 
         self._save(data)
         return True
+
+    def get_score_targets(self) -> dict:
+        score_targets = self._load().get("score_targets") or {}
+        return {
+            "default": int(score_targets.get("default") or DEFAULT_SCORE_TARGETS["default"]),
+            "final": int(score_targets.get("final") or DEFAULT_SCORE_TARGETS["final"]),
+            "grand_final": int(score_targets.get("grand_final") or DEFAULT_SCORE_TARGETS["grand_final"]),
+        }
+
+    def set_score_targets(self, default: int, final: int, grand_final: int):
+        data = self._load()
+        data["score_targets"] = {
+            "default": int(default),
+            "final": int(final),
+            "grand_final": int(grand_final),
+        }
+        self._save(data)
 
     def _load(self) -> dict:
         if not self.config_path.exists():

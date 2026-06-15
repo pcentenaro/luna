@@ -76,10 +76,19 @@ class AdminPanelView(discord.ui.View):
 
         await interaction.followup.send("No Luna admin role was configured.", ephemeral=True)
 
+    @discord.ui.button(label="Set score targets", style=discord.ButtonStyle.primary, row=2)
+    async def set_score_targets(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set score targets.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(SetScoreTargetsModal())
+
 
 def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     active_event = config.config_store.get_active_event()
     admin_role_id = config.config_store.get_admin_role_id()
+    score_targets = config.config_store.get_score_targets()
 
     event_value = "Not configured"
     if active_event:
@@ -105,6 +114,15 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     embed.add_field(name="Active event", value=event_value, inline=False)
     embed.add_field(name="Admin role", value=admin_role_value, inline=True)
     embed.add_field(name="Start.gg", value=startgg_value, inline=True)
+    embed.add_field(
+        name="Score targets",
+        value=(
+            f"Pools/bracket: `{score_targets['default']}`\n"
+            f"Winners/Losers Final: `{score_targets['final']}`\n"
+            f"Grand Final: `{score_targets['grand_final']}`"
+        ),
+        inline=False,
+    )
     embed.set_footer(text="Copa Luna tournament tools")
     return embed
 
@@ -181,6 +199,64 @@ class SetAdminRoleModal(discord.ui.Modal):
         config.config_store.set_admin_role_id(role.id)
         await refresh_admin_panel(interaction)
         await interaction.response.send_message(f"Luna admin role set to {role.mention}.", ephemeral=True)
+
+
+class SetScoreTargetsModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Set score targets")
+        score_targets = config.config_store.get_score_targets()
+        self.add_item(
+            discord.ui.InputText(
+                label="Pools/bracket",
+                placeholder="7",
+                value=str(score_targets["default"]),
+                required=True,
+            )
+        )
+        self.add_item(
+            discord.ui.InputText(
+                label="Winners/Losers Final",
+                placeholder="9",
+                value=str(score_targets["final"]),
+                required=True,
+            )
+        )
+        self.add_item(
+            discord.ui.InputText(
+                label="Grand Final",
+                placeholder="10",
+                value=str(score_targets["grand_final"]),
+                required=True,
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        parsed_scores = []
+        for child in self.children:
+            score = parse_positive_int(child.value)
+            if score is None:
+                await interaction.response.send_message(
+                    f"`{child.label}` must be a positive whole number.",
+                    ephemeral=True,
+                )
+                return
+            parsed_scores.append(score)
+
+        config.config_store.set_score_targets(
+            default=parsed_scores[0],
+            final=parsed_scores[1],
+            grand_final=parsed_scores[2],
+        )
+        await refresh_admin_panel(interaction)
+        await interaction.response.send_message(
+            (
+                "Score targets updated: "
+                f"pools/bracket `{parsed_scores[0]}`, "
+                f"Winners/Losers Final `{parsed_scores[1]}`, "
+                f"Grand Final `{parsed_scores[2]}`."
+            ),
+            ephemeral=True,
+        )
 
 
 async def refresh_admin_panel_response(interaction: discord.Interaction):
@@ -268,6 +344,18 @@ def parse_role_id(value: str) -> int | None:
         return None
 
     return int(digits)
+
+
+def parse_positive_int(value: str) -> int | None:
+    try:
+        parsed_value = int(value.strip())
+    except ValueError:
+        return None
+
+    if parsed_value < 1:
+        return None
+
+    return parsed_value
 
 
 def normalize_role_name(value: str) -> str:

@@ -217,56 +217,6 @@ class Startgg(commands.Cog):
         )
     
 
-    @startgg.command(
-            name="preview_report",
-            description="Preview a score report without submitting it"
-    )
-    async def preview_report(
-        ctx: discord.ApplicationContext,
-        set_id: str,
-        winner: discord.Member,
-        score: str,
-    ):
-        if config.startgg_client is None:
-            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
-            return
-        try:
-            parsed_set_id = int(set_id)
-        except ValueError:
-            await ctx.respond("The set ID must be a number.", ephemeral=True)
-            return
-        parsed_score = parse_score(score)
-        if parsed_score is None:
-            await ctx.respond("Score must use the format `7-5`.", ephemeral=True)
-            return
-        winner_link = config.link_store.get_startgg_link(winner.id)
-        if winner_link is None:
-            await ctx.respond("The winner does not have a start.gg link yet.", ephemeral=True)
-            return
-        await ctx.defer(ephemeral=True)
-        try:
-            set_data = await config.startgg_client.get_set(parsed_set_id)
-        except StartGGError as error:
-            await ctx.respond(f"Could not read start.gg set: {error}", ephemeral=True)
-            return
-        if set_data is None:
-            await ctx.respond(f"No start.gg set was found with ID {parsed_set_id}.", ephemeral=True)
-            return
-        report_preview = build_report_preview(set_data, winner_link["startgg_player_id"], parsed_score)
-        if report_preview["error"]:
-            await ctx.respond(report_preview["error"], ephemeral=True)
-            return
-        author_link = config.link_store.get_startgg_link(ctx.author.id)
-        if not is_luna_admin(ctx):
-            if author_link is None:
-                await ctx.respond("You need to link your start.gg profile before previewing reports.", ephemeral=True)
-                return
-
-            if not set_has_player(set_data, author_link["startgg_player_id"]):
-                await ctx.respond("Only players in this set or Luna admins can preview this report.", ephemeral=True)
-                return
-        await ctx.respond(report_preview["message"], ephemeral=True)
-
     @discord.slash_command(
             name="report",
             description="Report your next pending start.gg set. Examples: 7-5, 4-7"
@@ -1752,20 +1702,6 @@ def parse_score(score: str) -> tuple[int, int] | None:
     if left_score < 0 or right_score < 0 or left_score == right_score:
         return None
     return left_score, right_score
-
-
-def build_report_preview(set_data: dict, winner_player_id: int, score: tuple[int, int]) -> dict:
-    report = build_report_payload(set_data, winner_player_id, score)
-    if report["error"]:
-        return {"error": report["error"]}
-
-    message = (
-        "Report preview only. Nothing was submitted to start.gg.\n"
-        f"Set {set_data['id']} | {set_data.get('fullRoundText')}\n"
-        f"{report['winner_name']} {report['winner_score']} - {report['loser_score']} {report['loser_name']}\n"
-        f"Winner entrant ID: {report['winner_entrant_id']}"
-    )
-    return {"error": None, "message": message}
 
 
 def build_report_payload(set_data: dict, winner_player_id: int, score: tuple[int, int]) -> dict:

@@ -153,6 +153,10 @@ class StartGGClient:
                     round
                     state
                     slots {
+                      prereqId
+                      prereqPlacement
+                      prereqType
+                      slotIndex
                       standing {
                         stats {
                           score {
@@ -193,6 +197,10 @@ class StartGGClient:
                 round
                 state
                 slots {
+                  prereqId
+                  prereqPlacement
+                  prereqType
+                  slotIndex
                   standing {
                     stats {
                       score {

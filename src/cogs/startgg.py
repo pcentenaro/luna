@@ -473,6 +473,7 @@ def build_phase_group_links(active_event: dict, phase: dict, phase_groups: list[
 pending_report_user_ids_by_set: dict[int, set[int]] = {}
 pending_report_set_id_by_user: dict[int, int] = {}
 pinged_ready_set_ids: set[int] = set()
+announced_completed_phase_group_ids: set[int] = set()
 event_cache: dict = {}
 event_cache_lock = asyncio.Lock()
 
@@ -613,6 +614,8 @@ class ReportConfirmationView(discord.ui.View):
                 message=interaction.message,
                 channel=interaction.channel,
                 active_event=self.active_event,
+                match=self.match,
+                report=self.report,
                 report_message=report_message,
             )
         )
@@ -776,9 +779,24 @@ class DQReportModal(discord.ui.Modal):
         release_pending_report(set_id, self.report_view.player_discord_ids)
         message = self.report_view.message
         if message:
+            report_message = build_dq_report_success_message(
+                self.report_view.match,
+                dq_report,
+                self.report_view.active_event,
+            )
             await message.edit(
-                content=build_dq_report_success_message(self.report_view.match, dq_report, self.report_view.active_event),
+                content=f"{report_message}\n\nLuna is checking for ready matches...",
                 view=self.report_view,
+            )
+            asyncio.create_task(
+                update_ready_match_check_message(
+                    message=message,
+                    channel=message.channel,
+                    active_event=self.report_view.active_event,
+                    match=self.report_view.match,
+                    report=dq_report,
+                    report_message=report_message,
+                )
             )
         await interaction.followup.send("DQ reported.", ephemeral=True)
 
@@ -950,7 +968,14 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
     return len(new_ready_matches)
 
 
-async def update_ready_match_check_message(message, channel, active_event: dict, report_message: str):
+async def update_ready_match_check_message(
+    message,
+    channel,
+    active_event: dict,
+    match: dict,
+    report: dict,
+    report_message: str,
+):
     try:
         await refresh_event_cache(active_event)
         pinged_count = await announce_ready_matches_from_cache(channel, active_event)
@@ -960,6 +985,14 @@ async def update_ready_match_check_message(message, channel, active_event: dict,
         )
         return
 
+    try:
+        completion_announcement = await get_completion_announcement(match, report)
+    except StartGGError:
+        completion_announcement = None
+
+    if completion_announcement:
+        await channel.send(completion_announcement)
+
     if pinged_count:
         await message.edit(content=f"{report_message}\n\nLuna pinged {pinged_count} ready match(es).")
         return
@@ -967,6 +1000,91 @@ async def update_ready_match_check_message(message, channel, active_event: dict,
     await message.edit(
         content=f"{report_message}\n\nNo new ready matches yet. Please wait for Luna's next ready match ping."
     )
+
+
+async def get_completion_announcement(match: dict, report: dict) -> str | None:
+    phase = match["phase"]
+    phase_group = match["phase_group"]
+    set_data = match["set"]
+    phase_group_id = int(phase_group["id"])
+    if phase_group_id in announced_completed_phase_group_ids:
+        return None
+
+    phase_name = phase.get("name") or "Bracket"
+    normalized_phase_name = normalize_lookup_text(phase_name)
+    round_label = normalize_lookup_text(get_set_round_label(set_data))
+
+    if "pool" in normalized_phase_name:
+        completed = await wait_for_phase_group_completion(
+            phase_id=int(phase["id"]),
+            phase_group_id=phase_group_id,
+        )
+        if not completed:
+            return None
+
+        announced_completed_phase_group_ids.add(phase_group_id)
+        phase_group_label = phase_group.get("displayIdentifier") or phase_group_id
+        return (
+            f"Pool {phase_group_label} has completed all of its sets.\n"
+            "Please wait for the final brackets to be prepared."
+        )
+
+    tournament_finished = False
+    if "grand final reset" in round_label:
+        tournament_finished = True
+    elif round_label == "grand final":
+        tournament_finished = await winner_came_from_winners_final(
+            set_data=set_data,
+            winner_entrant_id=report["winner_entrant_id"],
+        )
+
+    if not tournament_finished:
+        return None
+
+    announced_completed_phase_group_ids.add(phase_group_id)
+    return f"The **{phase_name}** tournament has finished."
+
+
+async def wait_for_phase_group_completion(phase_id: int, phase_group_id: int) -> bool:
+    for attempt in range(3):
+        phase_groups = await config.startgg_client.get_phase_groups(phase_id)
+        matching_group = next(
+            (
+                phase_group for phase_group in phase_groups
+                if str(phase_group.get("id")) == str(phase_group_id)
+            ),
+            None,
+        )
+        if matching_group and str(matching_group.get("state")).casefold() in {"3", "completed"}:
+            return True
+
+        if attempt < 2:
+            await asyncio.sleep(2)
+
+    return False
+
+
+async def winner_came_from_winners_final(set_data: dict, winner_entrant_id: int) -> bool:
+    winner_slot = next(
+        (
+            slot for slot in set_data.get("slots") or []
+            if str((slot.get("entrant") or {}).get("id")) == str(winner_entrant_id)
+        ),
+        None,
+    )
+    if winner_slot is None or normalize_lookup_text(winner_slot.get("prereqType") or "") != "set":
+        return False
+
+    prereq_id = winner_slot.get("prereqId")
+    if prereq_id is None or not str(prereq_id).isdigit():
+        return False
+
+    prerequisite_set = await config.startgg_client.get_set(int(prereq_id))
+    if prerequisite_set is None:
+        return False
+
+    prerequisite_round = normalize_lookup_text(get_set_round_label(prerequisite_set))
+    return prerequisite_round == "winners final"
 
 
 def find_ready_matches_for_ping(event_matches: list[dict]) -> list[dict]:

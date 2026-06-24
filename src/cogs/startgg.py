@@ -562,6 +562,7 @@ class ReportConfirmationView(discord.ui.View):
         self.active_event = active_event
         self.player_discord_ids = player_discord_ids
         self.confirmed_user_ids = set()
+        self.confirmed_user_names = {}
         self.finished = False
         self.message = None
         self.last_admin_ping_at = None
@@ -572,12 +573,14 @@ class ReportConfirmationView(discord.ui.View):
             return
 
         self.confirmed_user_ids.add(interaction.user.id)
+        self.confirmed_user_names[interaction.user.id] = interaction.user.display_name
         if self.confirmed_user_ids != self.player_discord_ids:
             await interaction.response.edit_message(
                 content=build_player_report_confirmation_message(
                     self.match,
                     self.report,
                     confirmed_count=len(self.confirmed_user_ids),
+                    confirmed_users=list(self.confirmed_user_names.values()),
                 ),
                 view=self,
             )
@@ -1486,12 +1489,18 @@ def build_player_report_success_message(match: dict, report: dict, active_event:
     )
 
 
-def build_player_report_confirmation_message(match: dict, report: dict, confirmed_count: int = 0) -> str:
+def build_player_report_confirmation_message(
+    match: dict,
+    report: dict,
+    confirmed_count: int = 0,
+    confirmed_users: list[str] | None = None,
+) -> str:
     set_data = match["set"]
     phase = match["phase"]
     phase_group = match["phase_group"]
     phase_group_label = phase_group.get("displayIdentifier") or phase_group["id"]
     round_text = set_data.get("fullRoundText") or f"Round {set_data.get('round')}"
+    confirmed_users_text = ", ".join(confirmed_users or []) or "Nadie"
     return (
         "Resultado a reportar:\n"
         f"{report['player_name']} ({report['player_score']}) - "
@@ -1499,6 +1508,7 @@ def build_player_report_confirmation_message(match: dict, report: dict, confirme
         f"{phase['name']} - Group {phase_group_label} | {round_text}\n"
         f"Set ID: {set_data['id']}\n\n"
         "Seleccionen ✅ para confirmar o ❌ para cancelar.\n"
+        f"Confirmaron: {confirmed_users_text}\n"
         f"Confirmaciones: {confirmed_count}/2"
     )
 

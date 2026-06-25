@@ -125,6 +125,7 @@ class StartGGClient:
                 phaseGroups(query: {perPage: 50}) {
                   nodes {
                     id
+                    bracketType
                     displayIdentifier
                     state
                     wave {
@@ -152,6 +153,7 @@ class StartGGClient:
                     fullRoundText
                     round
                     state
+                    winnerId
                     slots {
                       prereqId
                       prereqPlacement
@@ -186,6 +188,34 @@ class StartGGClient:
         phase_group = data.get("phaseGroup")
         sets = phase_group.get("sets", {}) if phase_group else {}
         return sets.get("nodes", [])
+
+    async def get_phase_group_standings(self, phase_group_id: int) -> list[dict]:
+        data = await self.query(
+            """
+            query PhaseGroupStandings($phaseGroupId: ID!) {
+              phaseGroup(id: $phaseGroupId) {
+                standings(query: {page: 1, perPage: 100}) {
+                  nodes {
+                    placement
+                    entrant {
+                      id
+                      name
+                      participants {
+                        player {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """,
+            {"phaseGroupId": phase_group_id},
+        )
+        phase_group = data.get("phaseGroup")
+        standings = phase_group.get("standings", {}) if phase_group else {}
+        return standings.get("nodes", [])
 
     async def get_set(self, set_id: int) -> dict | None:
         data = await self.query(

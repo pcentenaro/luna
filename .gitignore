@@ -5,3 +5,5 @@ venv
 data/*.json
 *.pem
 **/*:Zone.Identifier
+luna.log
+nohup.out

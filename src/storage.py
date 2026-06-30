@@ -43,6 +43,9 @@ class LinkStore:
                 return link
         return None
 
+    def get_all_startgg_links(self) -> list[dict]:
+        return list(self._load().values())
+
     def delete_startgg_link(self, discord_user_id: int) -> bool:
         data = self._load()
         removed = data.pop(str(discord_user_id), None)

@@ -99,6 +99,53 @@ class StartGGClient:
         )
         return data.get("event")
 
+    async def get_event_entrants(self, event_id: int, per_page: int = 50) -> list[dict]:
+        entrants = []
+        page = 1
+
+        while True:
+            data = await self.query(
+                """
+                query EventEntrants($eventId: ID!, $page: Int!, $perPage: Int!) {
+                  event(id: $eventId) {
+                    entrants(query: {page: $page, perPage: $perPage}) {
+                      pageInfo {
+                        page
+                        totalPages
+                        total
+                      }
+                      nodes {
+                        id
+                        name
+                        participants {
+                          id
+                          gamerTag
+                          player {
+                            id
+                            gamerTag
+                            prefix
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """,
+                {"eventId": event_id, "page": page, "perPage": per_page},
+            )
+            event = data.get("event")
+            if event is None:
+                return []
+
+            connection = event.get("entrants") or {}
+            entrants.extend(connection.get("nodes") or [])
+            page_info = connection.get("pageInfo") or {}
+            total_pages = int(page_info.get("totalPages") or 1)
+            if page >= total_pages:
+                return entrants
+
+            page += 1
+
     async def get_event_phases(self, event_id: int) -> list[dict]:
         data = await self.query(
             """

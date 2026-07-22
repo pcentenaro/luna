@@ -473,6 +473,7 @@ def build_phase_group_links(active_event: dict, phase: dict, phase_groups: list[
 pending_report_user_ids_by_set: dict[int, set[int]] = {}
 pending_report_set_id_by_user: dict[int, int] = {}
 pinged_ready_set_ids: set[int] = set()
+pinged_waiting_players: set[tuple[int, int]] = set()
 announced_completed_phase_group_ids: set[int] = set()
 event_cache: dict = {}
 event_cache_lock = asyncio.Lock()
@@ -962,11 +963,27 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
 
     for match in new_ready_matches:
         set_id = int(match["set"]["id"])
+        content, embed = build_ready_match_ping(match)
         await channel.send(
-            build_ready_match_ping_message(match),
+            content=content,
+            embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
         pinged_ready_set_ids.add(set_id)
+
+    waiting_players = find_waiting_players_for_ping(event_matches, ready_matches)
+    new_waiting_players = [
+        waiting_player for waiting_player in waiting_players
+        if reping or waiting_player_key(waiting_player) not in pinged_waiting_players
+    ]
+    for waiting_player in new_waiting_players:
+        content, embed = build_waiting_player_ping(waiting_player)
+        await channel.send(
+            content=content,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+        pinged_waiting_players.add(waiting_player_key(waiting_player))
 
     return len(new_ready_matches)
 
@@ -1122,6 +1139,51 @@ def find_ready_matches_for_ping(event_matches: list[dict]) -> list[dict]:
     return sort_set_matches(ready_matches)
 
 
+def find_waiting_players_for_ping(event_matches: list[dict], ready_matches: list[dict]) -> list[dict]:
+    ready_player_ids = {
+        player_id
+        for match in ready_matches
+        for player_id in get_set_player_ids(match["set"])
+    }
+    player_matches_by_id: dict[int, list[dict]] = {}
+    for match in event_matches:
+        for player_id in get_set_player_ids(match["set"]):
+            player_matches_by_id.setdefault(player_id, []).append(match)
+
+    waiting_players = []
+    for player_id, player_matches in player_matches_by_id.items():
+        if player_id in ready_player_ids:
+            continue
+
+        link = config.link_store.get_startgg_link_by_player_id(player_id)
+        next_match = find_next_pending_match(player_matches)
+        if link is None or next_match is None:
+            continue
+
+        waiting_players.append(
+            {
+                "player_id": player_id,
+                "discord_user_id": int(link["discord_user_id"]),
+                "match": next_match,
+            }
+        )
+
+    return sorted(
+        waiting_players,
+        key=lambda waiting_player: (
+            get_set_round(waiting_player["match"]["set"]),
+            waiting_player["discord_user_id"],
+        ),
+    )
+
+
+def waiting_player_key(waiting_player: dict) -> tuple[int, int]:
+    return (
+        waiting_player["discord_user_id"],
+        int(waiting_player["match"]["set"]["id"]),
+    )
+
+
 def get_set_player_ids(set_data: dict) -> list[int]:
     player_ids = []
     for slot in set_data.get("slots") or []:
@@ -1135,7 +1197,7 @@ def get_set_player_ids(set_data: dict) -> list[int]:
     return player_ids
 
 
-def build_ready_match_ping_message(match: dict) -> str:
+def build_ready_match_ping(match: dict) -> tuple[str, discord.Embed]:
     player_mentions = []
     for player_id in get_set_player_ids(match["set"]):
         link = config.link_store.get_startgg_link_by_player_id(player_id)
@@ -1144,12 +1206,40 @@ def build_ready_match_ping_message(match: dict) -> str:
 
     mentions = " ".join(player_mentions)
     required_winner_score = get_required_winner_score(match["set"])
-    return (
-        f"{mentions} you are ready to play.\n"
-        f"{format_match_card(match)}\n"
-        f"Report score target: first to {required_winner_score}.\n"
-        "Use `/report` after the set is finished."
+    embed = discord.Embed(
+        title="Ready to play",
+        description=format_match_card(match),
+        color=discord.Color.blue(),
     )
+    embed.add_field(
+        name="Report score target",
+        value=f"First to {required_winner_score}.",
+        inline=False,
+    )
+    embed.set_footer(text="Use /report after the set is finished.")
+    return f"{mentions} you are ready to play.", embed
+
+
+def build_waiting_player_ping(waiting_player: dict) -> tuple[str, discord.Embed]:
+    match = waiting_player["match"]
+    required_winner_score = get_required_winner_score(match["set"])
+    embed = discord.Embed(
+        title="Waiting for your next match",
+        description=format_match_card(match),
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="Status",
+        value="Your opponent must finish an earlier match first.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Report score target",
+        value=f"First to {required_winner_score}.",
+        inline=False,
+    )
+    embed.set_footer(text="Luna will ping you when both players are ready.")
+    return f"<@{waiting_player['discord_user_id']}> please wait for your next match.", embed
 
 
 async def get_next_report_context(ctx: discord.ApplicationContext, opponent: discord.Member | None = None) -> dict:

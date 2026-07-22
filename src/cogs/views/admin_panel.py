@@ -84,6 +84,41 @@ class AdminPanelView(discord.ui.View):
 
         await interaction.response.send_modal(SetScoreTargetsModal())
 
+    @discord.ui.button(label="Linked accounts", style=discord.ButtonStyle.secondary, row=2)
+    async def linked_accounts(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message(
+                "Only Luna admins can review linked accounts.",
+                ephemeral=True,
+            )
+            return
+
+        if config.startgg_client is None:
+            await interaction.response.send_message("STARTGG_API_KEY is not configured yet.", ephemeral=True)
+            return
+
+        active_event = config.config_store.get_active_event()
+        if active_event is None:
+            await interaction.response.send_message("No active start.gg event is configured yet.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral= False)
+        try:
+            entrants = await config.startgg_client.get_event_entrants(active_event["event_id"])
+        except StartGGError as error:
+            await interaction.followup.send(
+                f"Could not read attendees from start.gg: {error}",
+                ephemeral=True,
+            )
+            return
+
+        embed = build_linked_accounts_embed(active_event, entrants, interaction.guild)
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
 
 def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     active_event = config.config_store.get_active_event()
@@ -125,6 +160,117 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     )
     embed.set_footer(text="Copa Luna tournament tools")
     return embed
+
+def build_linked_accounts_embed(
+    active_event: dict,
+    entrants: list[dict],
+    guild: discord.Guild | None,
+) -> discord.Embed:
+    links_by_player_id = {
+        str(link["startgg_player_id"]): link
+        for link in config.link_store.get_all_startgg_links()
+        if link.get("startgg_player_id") is not None
+    }
+    attendees = build_attendee_link_statuses(entrants, links_by_player_id)
+    linked_attendees = [attendee for attendee in attendees if attendee["link"] is not None]
+    unlinked_attendees = [attendee for attendee in attendees if attendee["link"] is None]
+
+    embed = discord.Embed(
+        title=f"{active_event['event_name']} linked accounts",
+        description=(
+            f"**Attendees:** {len(attendees)}\n"
+            f"**Linked:** {len(linked_attendees)}\n"
+            f"**Not linked:** {len(unlinked_attendees)}"
+        ),
+        color=discord.Color.gold(),
+        url=f"https://www.start.gg/{active_event['event_slug']}",
+    )
+    add_link_status_fields(
+        embed,
+        "Linked",
+        [
+            format_linked_attendee(attendee, guild)
+            for attendee in linked_attendees
+        ],
+    )
+    add_link_status_fields(
+        embed,
+        "Not linked",
+        [
+            f"Not linked: **{discord.utils.escape_markdown(attendee['name'])}**"
+            for attendee in unlinked_attendees
+        ],
+    )
+    embed.set_footer(text="Account links are stored by start.gg player ID.")
+    return embed
+
+
+def build_attendee_link_statuses(entrants: list[dict], links_by_player_id: dict[str, dict]) -> list[dict]:
+    attendees = []
+    for entrant in entrants:
+        participants = entrant.get("participants") or []
+        if not participants:
+            attendees.append(
+                {
+                    "name": entrant.get("name") or f"Entrant {entrant.get('id')}",
+                    "player_id": None,
+                    "link": None,
+                }
+            )
+            continue
+
+        for participant in participants:
+            player = participant.get("player") or {}
+            player_id = player.get("id")
+            gamer_tag = participant.get("gamerTag") or player.get("gamerTag") or entrant.get("name")
+            prefix = player.get("prefix")
+            display_name = f"{prefix} | {gamer_tag}" if prefix and gamer_tag else gamer_tag
+            attendees.append(
+                {
+                    "name": display_name or f"Participant {participant.get('id')}",
+                    "player_id": player_id,
+                    "link": links_by_player_id.get(str(player_id)) if player_id is not None else None,
+                }
+            )
+
+    return sorted(attendees, key=lambda attendee: attendee["name"].casefold())
+
+
+def format_linked_attendee(attendee: dict, guild: discord.Guild | None) -> str:
+    discord_user_id = int(attendee["link"]["discord_user_id"])
+    member = guild.get_member(discord_user_id) if guild else None
+    discord_profile = member.mention if member else f"<@{discord_user_id}>"
+    startgg_name = discord.utils.escape_markdown(attendee["name"])
+    return f"Linked: **{startgg_name}** -> {discord_profile}"
+
+
+def add_link_status_fields(embed: discord.Embed, title: str, lines: list[str]):
+    chunks = chunk_embed_lines(lines)
+    for index, chunk in enumerate(chunks):
+        field_name = title if index == 0 else f"{title} (continued)"
+        embed.add_field(name=field_name, value=chunk, inline=False)
+
+
+def chunk_embed_lines(lines: list[str], limit: int = 900) -> list[str]:
+    if not lines:
+        return ["None"]
+
+    chunks = []
+    current_lines = []
+    current_length = 0
+    for line in lines:
+        added_length = len(line) + (1 if current_lines else 0)
+        if current_lines and current_length + added_length > limit:
+            chunks.append("\n".join(current_lines))
+            current_lines = []
+            current_length = 0
+
+        current_lines.append(line)
+        current_length += len(line) + (1 if len(current_lines) > 1 else 0)
+
+    if current_lines:
+        chunks.append("\n".join(current_lines))
+    return chunks
 
 
 class SetEventModal(discord.ui.Modal):

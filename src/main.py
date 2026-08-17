@@ -17,5 +17,6 @@ async def hello(ctx: discord.ApplicationContext):
 if __name__ == "__main__":
     config.bot.load_extension("cogs.admin")
     config.bot.load_extension("cogs.seeding")
+    config.bot.load_extension("cogs.staff_help")
     config.bot.load_extension("cogs.startgg")
     config.bot.run(os.getenv('BOT_TOKEN')) # run the bot with the token

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,9 +14,16 @@ DEFAULT_SCORE_TARGETS = {
 
 
 class LinkStore:
-    def __init__(self, links_path: Path = DEFAULT_LINKS_PATH):
-        self.links_path = links_path
-        self.links_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self):
+        self.connection = sqlite3.connect("data/luna.db")
+        self.connection.row_factory = lambda cursor, row: {key: value for key, value in zip([col[0] for col in cursor.description], row)}
+        self.cursor = self.connection.cursor()
+        self._create_tables()
+
+    def _create_tables(self):
+        queries = [(Path(__file__).parent / "queries" / "create_link_table.sql").read_text()]
+        for query in queries:
+           self.cursor.execute(query)
 
     def set_startgg_link(
         self,
@@ -24,51 +32,24 @@ class LinkStore:
         gamer_tag: str | None,
         prefix: str | None,
     ):
-        data = self._load()
-        data[str(discord_user_id)] = {
-            "discord_user_id": discord_user_id,
-            "startgg_player_id": startgg_player_id,
-            "startgg_gamer_tag": gamer_tag,
-            "startgg_prefix": prefix,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._save(data)
+        self.cursor.execute(f"INSERT INTO links VALUES({discord_user_id}, {startgg_player_id}, \"{gamer_tag}\", \"{prefix}\", \"{datetime.now(timezone.utc).isoformat()}\")")
+        self.connection.commit()
 
     def get_startgg_link(self, discord_user_id: int) -> dict | None:
-        return self._load().get(str(discord_user_id))
+        self.cursor.execute(f"SELECT * FROM links WHERE discord_user_id = {discord_user_id}")
+        return self.cursor.fetchone()
 
     def get_startgg_link_by_player_id(self, startgg_player_id: int) -> dict | None:
-        for link in self._load().values():
-            if str(link.get("startgg_player_id")) == str(startgg_player_id):
-                return link
-        return None
+        self.cursor.execute(f"SELECT * FROM links WHERE startgg_player_id = {startgg_player_id}")
+        return self.cursor.fetchone()
 
     def get_all_startgg_links(self) -> list[dict]:
-        return list(self._load().values())
+        self.cursor.execute(f"SELECT * FROM links")
+        return self.cursor.fetchall()
 
     def delete_startgg_link(self, discord_user_id: int) -> bool:
-        data = self._load()
-        removed = data.pop(str(discord_user_id), None)
-        if removed is None:
-            return False
-
-        self._save(data)
-        return True
-
-    def _load(self) -> dict:
-        if not self.links_path.exists():
-            return {}
-
-        with self.links_path.open("r", encoding="utf-8") as file:
-            return json.load(file)
-
-    def _save(self, data: dict):
-        temporary_path = self.links_path.with_suffix(".tmp")
-        with temporary_path.open("w", encoding="utf-8") as file:
-            json.dump(data, file, indent=2, ensure_ascii=False)
-            file.write("\n")
-
-        temporary_path.replace(self.links_path)
+        self.cursor.execute(f"DELETE FROM links WHERE discord_user_id = {discord_user_id}")
+        self.connection.commit()
 
 
 class ConfigStore:

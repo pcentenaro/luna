@@ -32,7 +32,18 @@ class LinkStore:
         gamer_tag: str | None,
         prefix: str | None,
     ):
-        self.cursor.execute(f"INSERT INTO links VALUES({discord_user_id}, {startgg_player_id}, \"{gamer_tag}\", \"{prefix}\", \"{datetime.now(timezone.utc).isoformat()}\")")
+        self.cursor.execute(f"""
+            INSERT INTO links
+                VALUES({discord_user_id}, {startgg_player_id}, \"{gamer_tag}\", \"{prefix}\", \"{datetime.now(timezone.utc).isoformat()}\")
+                ON CONFLICT(startgg_player_id) DO NOTHING
+                ON CONFLICT(discord_user_id) DO UPDATE SET
+                    startgg_player_id = excluded.startgg_player_id,
+                    startgg_gamer_tag = excluded.startgg_gamer_tag,
+                    startgg_prefix = excluded.startgg_prefix,
+                    updated_at = excluded.updated_at
+                WHERE startgg_player_id NOT IN ({startgg_player_id})
+            """
+        )
         self.connection.commit()
 
     def get_startgg_link(self, discord_user_id: int) -> dict | None:

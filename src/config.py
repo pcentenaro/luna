@@ -18,5 +18,6 @@ bot = commands.Bot(
 
 startgg_api_key = os.getenv("STARTGG_API_KEY")
 startgg_client = StartGGClient(startgg_api_key) if startgg_api_key else None
+rae_api_key = os.getenv("RAE_API_KEY")
 link_store = LinkStore()
 config_store = ConfigStore()

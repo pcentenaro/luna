@@ -33,7 +33,7 @@ CRITERIA = {
     "multiple_meanings": "Tiene varias acepciones",
     "synonyms": "Tiene sinónimos",
     "antonyms": "Tiene antónimos",
-    "examples": "Incluye ejemplos de uso",
+    "three_letter_palindrome": "Contiene una secuencia palíndroma de tres letras",
     "regional": "Tiene algún uso regional",
 }
 CRITERION_GROUPS = {
@@ -204,13 +204,14 @@ def matching_criteria(word: str, entry: dict) -> set[str]:
         matches.add("double_letter")
     if len(set(word)) < len(word):
         matches.add("repeated_letter")
+    if any(word[index] == word[index + 2] for index in range(len(word) - 2)):
+        matches.add("three_letter_palindrome")
     if sum(letter in VOWELS for letter in word) >= 3:
         matches.add("three_vowels")
     if word[0] == word[-1]:
         matches.add("same_ends")
     matches.update(categories & {"noun", "verb", "adjective", "adverb"})
     matches.update(genders & {"feminine", "masculine"})
-    # ponytail: RAE API omite el género de adjetivos; reemplazar cuando exponga flexión.
     if "adjective" in categories and word.endswith("a"):
         matches.add("feminine")
     elif "adjective" in categories and word.endswith("o"):
@@ -223,8 +224,6 @@ def matching_criteria(word: str, entry: dict) -> set[str]:
         matches.add("synonyms")
     if any(sense.get("antonyms") for sense in senses):
         matches.add("antonyms")
-    if any(sense.get("examples") for sense in senses):
-        matches.add("examples")
     if any(sense.get("regions") for sense in senses):
         matches.add("regional")
     return matches

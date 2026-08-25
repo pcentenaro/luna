@@ -62,13 +62,33 @@ class GuessClues(commands.Cog):
 
     clues = discord.SlashCommandGroup("clues", "Adivina las pistas de una palabra")
 
-    @clues.command(name="start", description="Inicia una partida en este canal")
-    async def start(self, ctx: discord.ApplicationContext):
+    @clues.command(name="start", description="Inicia una partida individual o cooperativa")
+    async def start(
+        self,
+        ctx: discord.ApplicationContext,
+        modo: str = discord.Option(
+            str,
+            description="Quién puede jugar esta partida",
+            choices=["individual", "cooperativo"],
+            required=False,
+            default="individual",
+        ),
+    ):
         if not config.rae_api_key:
             await ctx.respond("RAE_API_KEY no está configurada.", ephemeral=True)
             return
-        if ctx.channel.id in self.games:
-            await ctx.respond("Ya hay una partida activa en este canal.", ephemeral=True)
+        key = (ctx.channel.id, None if modo == "cooperativo" else ctx.author.id)
+        if key in self.games:
+            await ctx.respond("Ya hay una partida activa de ese modo.", ephemeral=True)
+            return
+        if any(
+            channel_id == ctx.channel.id and None in (owner_id, key[1])
+            for channel_id, owner_id in self.games
+        ):
+            await ctx.respond(
+                "No se pueden mezclar partidas individuales y cooperativas en el mismo canal.",
+                ephemeral=True,
+            )
             return
 
         await ctx.defer()
@@ -81,7 +101,7 @@ class GuessClues(commands.Cog):
 
         target_criteria = matching_criteria(word, entry)
         criteria = choose_round_criteria(target_criteria)
-        self.games[ctx.channel.id] = {
+        self.games[key] = {
             "criteria": criteria,
             "target_criteria": target_criteria,
             "target_word": word,
@@ -89,9 +109,10 @@ class GuessClues(commands.Cog):
             "attempts": 0,
             "owner_id": ctx.author.id,
         }
-        game = self.games[ctx.channel.id]
+        game = self.games[key]
         await ctx.respond(
             "## Guess the Clues\n"
+            f"Modo **{modo}**.\n"
             "Descubre los tres criterios que cumple la palabra base. Cualquier "
             "palabra válida que cumpla los tres gana.\n\n"
             f"{format_board(game)}\n\n"
@@ -100,7 +121,8 @@ class GuessClues(commands.Cog):
 
     @clues.command(name="guess", description="Prueba una palabra española")
     async def guess(self, ctx: discord.ApplicationContext, palabra: str):
-        game = self.games.get(ctx.channel.id)
+        key = find_game_key(self.games, ctx.channel.id, ctx.author.id)
+        game = self.games.get(key)
         if game is None:
             await ctx.respond("No hay partida activa. Usa `/clues start`.", ephemeral=True)
             return
@@ -142,14 +164,15 @@ class GuessClues(commands.Cog):
                 f"{game['attempts']} intentos. Palabra base: "
                 f"**{game['target_word'].upper()}**."
             )
-            del self.games[ctx.channel.id]
+            del self.games[key]
         else:
             lines.append(f"\nQuedan **{len(remaining)}** criterios correctos por descubrir.")
         await ctx.respond("\n".join(lines))
 
     @clues.command(name="status", description="Muestra las pistas descubiertas")
     async def status(self, ctx: discord.ApplicationContext):
-        game = self.games.get(ctx.channel.id)
+        key = find_game_key(self.games, ctx.channel.id, ctx.author.id)
+        game = self.games.get(key)
         if game is None:
             await ctx.respond("No hay partida activa. Usa `/clues start`.", ephemeral=True)
             return
@@ -157,14 +180,15 @@ class GuessClues(commands.Cog):
 
     @clues.command(name="stop", description="Cancela la partida de este canal")
     async def stop(self, ctx: discord.ApplicationContext):
-        game = self.games.get(ctx.channel.id)
+        key = find_game_key(self.games, ctx.channel.id, ctx.author.id)
+        game = self.games.get(key)
         if game is None:
             await ctx.respond("No hay partida activa.", ephemeral=True)
             return
         if ctx.author.id != game["owner_id"]:
             await ctx.respond("Solo quien inició la partida puede cancelarla.", ephemeral=True)
             return
-        del self.games[ctx.channel.id]
+        del self.games[key]
         await ctx.respond("Partida cancelada.")
 
 
@@ -175,6 +199,10 @@ def setup(bot):
 def normalize_word(value: str) -> str | None:
     word = value.strip().casefold()
     return word if word and word.isalpha() else None
+
+
+def find_game_key(games: dict, channel_id: int, user_id: int) -> tuple | None:
+    return next((key for key in ((channel_id, user_id), (channel_id, None)) if key in games), None)
 
 
 def matching_criteria(word: str, entry: dict) -> set[str]:

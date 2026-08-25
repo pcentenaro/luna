@@ -92,8 +92,8 @@ class GuessClues(commands.Cog):
         game = self.games[ctx.channel.id]
         await ctx.respond(
             "## Guess the Clues\n"
-            "Descubre cuáles criterios cumple la palabra objetivo. Cada palabra "
-            "válida prueba todos los criterios que ella misma cumple.\n\n"
+            "Descubre los tres criterios que cumple la palabra base. Cualquier "
+            "palabra válida que cumpla los tres gana.\n\n"
             f"{format_board(game)}\n\n"
             "Usa `/clues guess palabra:` para jugar."
         )
@@ -131,18 +131,20 @@ class GuessClues(commands.Cog):
             if newly_resolved
             else "No resuelve ningún criterio nuevo."
         )
+        remaining = remaining_correct_criteria(game)
+        if not remaining:
+            game["resolved"].update(game["criteria"])
         lines = [f"**{word.upper()}** — {result}", "", format_board(game)]
 
-        hidden = len(set(game["criteria"]) - game["resolved"])
-        if hidden == 0:
+        if not remaining:
             lines.append(
                 f"\n🎉 {ctx.author.mention} resolvió el tablero en "
-                f"{game['attempts']} intentos. La palabra objetivo era "
+                f"{game['attempts']} intentos. Palabra base: "
                 f"**{game['target_word'].upper()}**."
             )
             del self.games[ctx.channel.id]
         else:
-            lines.append(f"\nQuedan **{hidden}** criterios por resolver.")
+            lines.append(f"\nQuedan **{len(remaining)}** criterios correctos por descubrir.")
         await ctx.respond("\n".join(lines))
 
     @clues.command(name="status", description="Muestra las pistas descubiertas")
@@ -208,6 +210,11 @@ def matching_criteria(word: str, entry: dict) -> set[str]:
         matches.add("same_ends")
     matches.update(categories & {"noun", "verb", "adjective", "adverb"})
     matches.update(genders & {"feminine", "masculine"})
+    # ponytail: RAE API omite el género de adjetivos; reemplazar cuando exponga flexión.
+    if "adjective" in categories and word.endswith("a"):
+        matches.add("feminine")
+    elif "adjective" in categories and word.endswith("o"):
+        matches.add("masculine")
     if "masculine_and_feminine" in genders:
         matches.update({"feminine", "masculine"})
     if len(senses) > 1:
@@ -258,6 +265,10 @@ def format_board(game: dict) -> str:
             marker = "❌"
         lines.append(f"{marker} {CRITERIA[key]}")
     return "\n".join(lines)
+
+
+def remaining_correct_criteria(game: dict) -> set[str]:
+    return (set(game["criteria"]) & game["target_criteria"]) - game["resolved"]
 
 
 async def random_entry(session: aiohttp.ClientSession) -> tuple[str, dict]:

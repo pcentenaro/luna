@@ -34,7 +34,7 @@ CRITERIA = {
     "synonyms": "Tiene sinónimos",
     "antonyms": "Tiene antónimos",
     "three_letter_palindrome": "Contiene una secuencia palíndroma de tres letras",
-    "regional": "Tiene algún uso regional",
+    "regional": "Tiene alguna acepción regional",
 }
 CRITERION_GROUPS = {
     "starts_vowel": "start",

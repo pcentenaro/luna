@@ -144,8 +144,9 @@ class GuessClues(commands.Cog):
             return
 
         game["attempts"] += 1
+        guess_criteria = matching_criteria(word, entry)
         newly_resolved = (
-            matching_criteria(word, entry) & set(game["criteria"])
+            guess_criteria & set(game["criteria"])
         ) - game["resolved"]
         game["resolved"].update(newly_resolved)
         result = (
@@ -154,19 +155,22 @@ class GuessClues(commands.Cog):
             else "No resuelve ningún criterio nuevo."
         )
         remaining = remaining_correct_criteria(game)
-        if not remaining:
+        won = is_winning_guess(game, guess_criteria)
+        if won:
             game["resolved"].update(game["criteria"])
         lines = [f"**{word.upper()}** — {result}", "", format_board(game)]
 
-        if not remaining:
+        if won:
             lines.append(
                 f"\n🎉 {ctx.author.mention} resolvió el tablero en "
                 f"{game['attempts']} intentos. Palabra base: "
                 f"**{game['target_word'].upper()}**."
             )
             del self.games[key]
-        else:
+        elif remaining:
             lines.append(f"\nQuedan **{len(remaining)}** criterios correctos por descubrir.")
+        else:
+            lines.append("\nYa conoces los tres criterios. Prueba una palabra que cumpla los tres a la vez.")
         await ctx.respond("\n".join(lines))
 
     @clues.command(name="status", description="Muestra las pistas descubiertas")
@@ -296,6 +300,10 @@ def format_board(game: dict) -> str:
 
 def remaining_correct_criteria(game: dict) -> set[str]:
     return (set(game["criteria"]) & game["target_criteria"]) - game["resolved"]
+
+
+def is_winning_guess(game: dict, guess_criteria: set[str]) -> bool:
+    return (set(game["criteria"]) & game["target_criteria"]) <= guess_criteria
 
 
 async def random_entry(session: aiohttp.ClientSession) -> tuple[str, dict]:

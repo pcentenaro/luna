@@ -5,6 +5,7 @@ from datetime import datetime
 from datetime import timezone
 from discord.ext import commands
 from startgg import StartGGClient, StartGGError
+from storage import LinkStore
 
 
 class Startgg(commands.Cog):
@@ -831,6 +832,9 @@ class LinkStartggAccountModal(discord.ui.Modal):
 
         try:
             player = await find_startgg_player(player_reference)
+            if LinkStore().get_startgg_link_by_player_id(player["id"]) is not None:
+                await interaction.followup.send("This start.gg account is already linked to a Discord profile.", ephemeral=True)
+                return
         except StartGGError as error:
             await interaction.followup.send(f"Could not verify that start.gg profile: {error}", ephemeral=True)
             return

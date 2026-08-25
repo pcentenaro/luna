@@ -21,7 +21,7 @@ class LinkStore:
         self._create_tables()
 
     def _create_tables(self):
-        queries = [(Path(__file__).parent / "queries" / "create_link_table.sql").read_text()]
+        queries = [(Path(__file__).parent / "queries" / "create_links_table.sql").read_text()]
         for query in queries:
            self.cursor.execute(query)
 

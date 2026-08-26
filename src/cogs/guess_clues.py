@@ -1,5 +1,8 @@
+import asyncio
 import random
+from datetime import datetime, time, timedelta, timezone
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import config
@@ -8,6 +11,7 @@ from discord.ext import commands
 
 
 RAE_API_URL = "https://rae-api.com/api"
+DAILY_TIME_ZONE = ZoneInfo("America/Los_Angeles")
 VOWELS = set("aeiouáéíóúü")
 CRITERIA = {
     "starts_vowel": "Empieza con vocal",
@@ -59,17 +63,58 @@ class GuessClues(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.games = {}
+        self.daily_lock = asyncio.Lock()
+
+    async def get_daily_challenge(self) -> dict:
+        today, _ = daily_window()
+        async with self.daily_lock:
+            daily = config.clues_store.get_daily_clues()
+            if daily and daily.get("date") == today:
+                return daily
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as session:
+                word, entry = await random_entry(session)
+            target_criteria = matching_criteria(word, entry)
+            daily = {
+                "date": today,
+                "target_word": word,
+                "target_criteria": list(target_criteria),
+                "criteria": choose_round_criteria(target_criteria),
+                "players": [],
+            }
+            config.clues_store.set_daily_clues(daily)
+            return daily
+
+    async def claim_daily_attempt(self, game: dict, user_id: int) -> str:
+        today, _ = daily_window()
+        async with self.daily_lock:
+            daily = config.clues_store.get_daily_clues()
+            if (
+                game.get("daily_date") != today
+                or not daily
+                or daily.get("date") != today
+            ):
+                return "expired"
+            players = daily.setdefault("players", [])
+            user_id = str(user_id)
+            if user_id in players:
+                return "played"
+            players.append(user_id)
+            config.clues_store.set_daily_clues(daily)
+            return "ok"
 
     clues = discord.SlashCommandGroup("clues", "Adivina las pistas de una palabra")
 
-    @clues.command(name="start", description="Inicia una partida individual o cooperativa")
+    @clues.command(name="start", description="Inicia una partida individual, cooperativa o diaria")
     async def start(
         self,
         ctx: discord.ApplicationContext,
         modo: str = discord.Option(
             str,
             description="Quién puede jugar esta partida",
-            choices=["individual", "cooperativo"],
+            choices=["individual", "cooperativo", "diario"],
             required=False,
             default="individual",
         ),
@@ -77,6 +122,23 @@ class GuessClues(commands.Cog):
         if not config.rae_api_key:
             await ctx.respond("RAE_API_KEY no está configurada.", ephemeral=True)
             return
+        if modo == "diario":
+            today, reset_at = daily_window()
+            daily = config.clues_store.get_daily_clues()
+            if (
+                daily
+                and daily.get("date") == today
+                and str(ctx.author.id) in daily.get("players", [])
+            ):
+                await ctx.respond(daily_wait_message(reset_at), ephemeral=True)
+                return
+            if any(
+                game.get("mode") == "diario" and game["owner_id"] == ctx.author.id
+                for game in self.games.values()
+            ):
+                await ctx.respond("Ya tienes un desafío diario activo.", ephemeral=True)
+                return
+
         key = (ctx.channel.id, None if modo == "cooperativo" else ctx.author.id)
         if key in self.games:
             await ctx.respond("Ya hay una partida activa de ese modo.", ephemeral=True)
@@ -86,21 +148,26 @@ class GuessClues(commands.Cog):
             for channel_id, owner_id in self.games
         ):
             await ctx.respond(
-                "No se pueden mezclar partidas individuales y cooperativas en el mismo canal.",
+                "No se puede mezclar una partida cooperativa con otra modalidad en el mismo canal.",
                 ephemeral=True,
             )
             return
 
-        await ctx.defer()
+        await ctx.defer(ephemeral=modo == "diario")
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                word, entry = await random_entry(session)
+            if modo == "diario":
+                daily = await self.get_daily_challenge()
+                word = daily["target_word"]
+                target_criteria = set(daily["target_criteria"])
+                criteria = list(daily["criteria"])
+            else:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                    word, entry = await random_entry(session)
+                target_criteria = matching_criteria(word, entry)
+                criteria = choose_round_criteria(target_criteria)
         except (aiohttp.ClientError, TimeoutError, RaeApiError) as error:
             await ctx.respond(f"No pude iniciar la partida con RAE API: {error}", ephemeral=True)
             return
-
-        target_criteria = matching_criteria(word, entry)
-        criteria = choose_round_criteria(target_criteria)
         self.games[key] = {
             "criteria": criteria,
             "target_criteria": target_criteria,
@@ -108,15 +175,23 @@ class GuessClues(commands.Cog):
             "resolved": set(),
             "attempts": 0,
             "owner_id": ctx.author.id,
+            "mode": modo,
+            "daily_date": daily["date"] if modo == "diario" else None,
         }
         game = self.games[key]
+        rules = (
+            "Tienes un único intento para encontrar una palabra que cumpla los tres criterios."
+            if modo == "diario"
+            else "Descubre los tres criterios que cumple la palabra base. "
+            "Cualquier palabra válida que cumpla los tres gana."
+        )
         await ctx.respond(
             "## Guess the Clues\n"
             f"Modo **{modo}**.\n"
-            "Descubre los tres criterios que cumple la palabra base. Cualquier "
-            "palabra válida que cumpla los tres gana.\n\n"
+            f"{rules}\n\n"
             f"{format_board(game)}\n\n"
-            "Usa `/clues guess palabra:` para jugar."
+            "Usa `/clues guess palabra:` para jugar.",
+            ephemeral=modo == "diario",
         )
 
     @clues.command(name="guess", description="Prueba una palabra española")
@@ -127,12 +202,13 @@ class GuessClues(commands.Cog):
             await ctx.respond("No hay partida activa. Usa `/clues start`.", ephemeral=True)
             return
 
+        private = game.get("mode") == "diario"
         word = normalize_word(palabra)
         if word is None:
             await ctx.respond("Escribe una sola palabra formada únicamente por letras.", ephemeral=True)
             return
 
-        await ctx.defer()
+        await ctx.defer(ephemeral=private)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 entry = await fetch_entry(session, word)
@@ -140,8 +216,21 @@ class GuessClues(commands.Cog):
             await ctx.respond(f"No pude consultar RAE API: {error}", ephemeral=True)
             return
         if entry is None:
-            await ctx.respond(f"`{word}` no aparece en el diccionario.")
+            await ctx.respond(f"`{word}` no aparece en el diccionario.", ephemeral=private)
             return
+
+        if private:
+            attempt = await self.claim_daily_attempt(game, ctx.author.id)
+            if attempt != "ok":
+                del self.games[key]
+                message = (
+                    "El desafío diario anterior ya terminó. Inicia el nuevo con "
+                    "`/clues start modo:diario`."
+                    if attempt == "expired"
+                    else daily_wait_message()
+                )
+                await ctx.respond(message, ephemeral=True)
+                return
 
         game["attempts"] += 1
         guess_criteria = matching_criteria(word, entry)
@@ -159,6 +248,17 @@ class GuessClues(commands.Cog):
         if won:
             game["resolved"].update(game["criteria"])
         lines = [f"**{word.upper()}** — {result}", "", format_board(game)]
+
+        if private:
+            lines.append(
+                "\n🎉 Cumpliste los tres criterios."
+                if won
+                else "\nNo cumpliste los tres criterios simultáneamente."
+            )
+            lines.append(f"\n{daily_wait_message()}")
+            del self.games[key]
+            await ctx.respond("\n".join(lines), ephemeral=True)
+            return
 
         if won:
             lines.append(
@@ -180,7 +280,10 @@ class GuessClues(commands.Cog):
         if game is None:
             await ctx.respond("No hay partida activa. Usa `/clues start`.", ephemeral=True)
             return
-        await ctx.respond(f"{format_board(game)}\n\nIntentos: {game['attempts']}")
+        await ctx.respond(
+            f"{format_board(game)}\n\nIntentos: {game['attempts']}",
+            ephemeral=game.get("mode") == "diario",
+        )
 
     @clues.command(name="stop", description="Cancela la partida de este canal")
     async def stop(self, ctx: discord.ApplicationContext):
@@ -192,12 +295,28 @@ class GuessClues(commands.Cog):
         if ctx.author.id != game["owner_id"]:
             await ctx.respond("Solo quien inició la partida puede cancelarla.", ephemeral=True)
             return
+        private = game.get("mode") == "diario"
         del self.games[key]
-        await ctx.respond("Partida cancelada.")
+        await ctx.respond("Partida cancelada.", ephemeral=private)
 
 
 def setup(bot):
     bot.add_cog(GuessClues(bot))
+
+
+def daily_window(now: datetime | None = None) -> tuple[str, int]:
+    now = now or datetime.now(timezone.utc)
+    pacific = now.astimezone(DAILY_TIME_ZONE)
+    reset_at = datetime.combine(
+        pacific.date() + timedelta(days=1), time.min, DAILY_TIME_ZONE
+    )
+    return pacific.date().isoformat(), int(reset_at.timestamp())
+
+
+def daily_wait_message(reset_at: int | None = None) -> str:
+    if reset_at is None:
+        _, reset_at = daily_window()
+    return f"Ya has jugado hoy. Siguiente desafío: <t:{reset_at}:R>."
 
 
 def normalize_word(value: str) -> str | None:

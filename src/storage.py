@@ -5,6 +5,7 @@ from pathlib import Path
 
 DEFAULT_LINKS_PATH = Path(__file__).resolve().parent.parent / "data" / "links.json"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "config.json"
+DEFAULT_CLUES_PATH = Path(__file__).resolve().parent.parent / "data" / "clues.json"
 DEFAULT_SCORE_TARGETS = {
     "default": 7,
     "final": 9,
@@ -69,6 +70,27 @@ class LinkStore:
             file.write("\n")
 
         temporary_path.replace(self.links_path)
+
+
+class CluesStore:
+    def __init__(self, clues_path: Path = DEFAULT_CLUES_PATH):
+        self.clues_path = clues_path
+        self.clues_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def get_daily_clues(self) -> dict | None:
+        if not self.clues_path.exists():
+            return None
+
+        with self.clues_path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+
+    def set_daily_clues(self, daily_clues: dict):
+        temporary_path = self.clues_path.with_suffix(".tmp")
+        with temporary_path.open("w", encoding="utf-8") as file:
+            json.dump(daily_clues, file, indent=2, ensure_ascii=False)
+            file.write("\n")
+
+        temporary_path.replace(self.clues_path)
 
 
 class ConfigStore:

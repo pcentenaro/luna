@@ -1,6 +1,6 @@
 import asyncio
 import random
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -83,11 +83,12 @@ class GuessClues(commands.Cog):
                 "target_criteria": list(target_criteria),
                 "criteria": choose_round_criteria(target_criteria),
                 "players": [],
+                "streaks": daily.get("streaks", {}) if daily else {},
             }
             config.clues_store.set_daily_clues(daily)
             return daily
 
-    async def claim_daily_attempt(self, game: dict, user_id: int) -> str:
+    async def claim_daily_attempt(self, game: dict, user_id: int, won: bool) -> tuple[str, int]:
         today, _ = daily_window()
         async with self.daily_lock:
             daily = config.clues_store.get_daily_clues()
@@ -96,14 +97,18 @@ class GuessClues(commands.Cog):
                 or not daily
                 or daily.get("date") != today
             ):
-                return "expired"
+                return "expired", 0
             players = daily.setdefault("players", [])
             user_id = str(user_id)
             if user_id in players:
-                return "played"
+                return "played", daily_streak(daily, user_id)
             players.append(user_id)
+            streak = update_daily_streak(
+                daily.get("streaks", {}).get(user_id), today, won
+            )
+            daily.setdefault("streaks", {})[user_id] = streak
             config.clues_store.set_daily_clues(daily)
-            return "ok"
+            return "ok", streak["count"]
 
     clues = discord.SlashCommandGroup("clues", "Adivina las pistas de una palabra")
 
@@ -130,7 +135,10 @@ class GuessClues(commands.Cog):
                 and daily.get("date") == today
                 and str(ctx.author.id) in daily.get("players", [])
             ):
-                await ctx.respond(daily_wait_message(reset_at), ephemeral=True)
+                await ctx.respond(
+                    daily_wait_message(reset_at, daily_streak(daily, ctx.author.id)),
+                    ephemeral=True,
+                )
                 return
             if any(
                 game.get("mode") == "diario" and game["owner_id"] == ctx.author.id
@@ -218,22 +226,23 @@ class GuessClues(commands.Cog):
         if entry is None:
             await ctx.respond(f"`{word}` no aparece en el diccionario.", ephemeral=private)
             return
+        guess_criteria = matching_criteria(word, entry)
+        won = is_winning_guess(game, guess_criteria)
 
         if private:
-            attempt = await self.claim_daily_attempt(game, ctx.author.id)
+            attempt, streak = await self.claim_daily_attempt(game, ctx.author.id, won)
             if attempt != "ok":
                 del self.games[key]
                 message = (
                     "El desafío diario anterior ya terminó. Inicia el nuevo con "
                     "`/clues start modo:diario`."
                     if attempt == "expired"
-                    else daily_wait_message()
+                    else daily_wait_message(streak=streak)
                 )
                 await ctx.respond(message, ephemeral=True)
                 return
 
         game["attempts"] += 1
-        guess_criteria = matching_criteria(word, entry)
         newly_resolved = (
             guess_criteria & set(game["criteria"])
         ) - game["resolved"]
@@ -244,7 +253,6 @@ class GuessClues(commands.Cog):
             else "No resuelve ningún criterio nuevo."
         )
         remaining = remaining_correct_criteria(game)
-        won = is_winning_guess(game, guess_criteria)
         if won:
             game["resolved"].update(game["criteria"])
         lines = [f"**{word.upper()}** — {result}", "", format_board(game)]
@@ -255,6 +263,8 @@ class GuessClues(commands.Cog):
                 if won
                 else "\nNo cumpliste los tres criterios simultáneamente."
             )
+            unit = "día" if streak == 1 else "días"
+            lines.append(f"\n🔥 Tu racha: **{streak} {unit}**.")
             lines.append(f"\n{daily_wait_message()}")
             del self.games[key]
             await ctx.respond("\n".join(lines), ephemeral=True)
@@ -313,10 +323,30 @@ def daily_window(now: datetime | None = None) -> tuple[str, int]:
     return pacific.date().isoformat(), int(reset_at.timestamp())
 
 
-def daily_wait_message(reset_at: int | None = None) -> str:
+def daily_wait_message(reset_at: int | None = None, streak: int | None = None) -> str:
     if reset_at is None:
         _, reset_at = daily_window()
-    return f"Ya has jugado hoy. Siguiente desafío: <t:{reset_at}:R>."
+    message = f"Ya has jugado hoy. Siguiente desafío: <t:{reset_at}:R>."
+    if streak is None:
+        return message
+    unit = "día" if streak == 1 else "días"
+    return f"{message}\n🔥 Tu racha: **{streak} {unit}**."
+
+
+def daily_streak(daily: dict, user_id: int | str) -> int:
+    return int(daily.get("streaks", {}).get(str(user_id), {}).get("count", 0))
+
+
+def update_daily_streak(streak: dict | None, today: str, won: bool) -> dict:
+    if not won:
+        return {"count": 0}
+    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+    count = (
+        int((streak or {}).get("count", 0)) + 1
+        if (streak or {}).get("last_win") == yesterday
+        else 1
+    )
+    return {"count": count, "last_win": today}
 
 
 def normalize_word(value: str) -> str | None:

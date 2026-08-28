@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import config
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 
 RAE_API_URL = "https://rae-api.com/api"
@@ -65,7 +65,47 @@ class GuessClues(commands.Cog):
         self.games = {}
         self.daily_lock = asyncio.Lock()
 
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if not self.leaderboard_loop.is_running():
+            self.leaderboard_loop.start()
+
+    def cog_unload(self):
+        self.leaderboard_loop.cancel()
+
+    @tasks.loop(minutes=1)
+    async def leaderboard_loop(self):
+        await self.publish_pending_leaderboard()
+
+    async def publish_pending_leaderboard(self):
+        today, _ = daily_window()
+        async with self.daily_lock:
+            daily = config.clues_store.get_daily_clues()
+            if not daily:
+                return
+            pending = daily.setdefault("pending_leaderboards", [])
+            if pending:
+                leaderboard = pending[0]
+            elif daily.get("date") != today and not daily.get("leaderboard_published"):
+                leaderboard = daily
+            else:
+                return
+            channel = self.bot.get_channel(config.clues_leaderboard_channel_id)
+            if channel is None:
+                return
+            try:
+                await channel.send(format_daily_leaderboard(leaderboard))
+            except discord.HTTPException as error:
+                print(f"No pude publicar el leaderboard diario: {error}")
+                return
+            if pending:
+                pending.pop(0)
+            else:
+                daily["leaderboard_published"] = True
+            config.clues_store.set_daily_clues(daily)
+
     async def get_daily_challenge(self) -> dict:
+        await self.publish_pending_leaderboard()
         today, _ = daily_window()
         async with self.daily_lock:
             daily = config.clues_store.get_daily_clues()
@@ -77,18 +117,31 @@ class GuessClues(commands.Cog):
             ) as session:
                 word, entry = await random_entry(session)
             target_criteria = matching_criteria(word, entry)
+            pending = list(daily.get("pending_leaderboards", [])) if daily else []
+            if daily and not daily.get("leaderboard_published"):
+                pending.append({
+                    "date": daily.get("date"),
+                    "target_word": daily.get("target_word"),
+                    "results": daily.get("results", {}),
+                })
             daily = {
                 "date": today,
                 "target_word": word,
                 "target_criteria": list(target_criteria),
                 "criteria": choose_round_criteria(target_criteria),
                 "players": [],
+                "attempts": {},
+                "results": {},
                 "streaks": daily.get("streaks", {}) if daily else {},
+                "pending_leaderboards": pending,
+                "leaderboard_published": False,
             }
             config.clues_store.set_daily_clues(daily)
             return daily
 
-    async def claim_daily_attempt(self, game: dict, user_id: int, won: bool) -> tuple[str, int]:
+    async def record_daily_attempt(
+        self, game: dict, user_id: int, won: bool
+    ) -> tuple[str, int, int]:
         today, _ = daily_window()
         async with self.daily_lock:
             daily = config.clues_store.get_daily_clues()
@@ -97,18 +150,29 @@ class GuessClues(commands.Cog):
                 or not daily
                 or daily.get("date") != today
             ):
-                return "expired", 0
+                return "expired", 0, 0
             players = daily.setdefault("players", [])
             user_id = str(user_id)
+            attempts = daily.setdefault("attempts", {})
             if user_id in players:
-                return "played", daily_streak(daily, user_id)
-            players.append(user_id)
-            streak = update_daily_streak(
-                daily.get("streaks", {}).get(user_id), today, won
-            )
-            daily.setdefault("streaks", {})[user_id] = streak
+                return (
+                    "played",
+                    int(attempts.get(user_id, 0)),
+                    daily_streak(daily, user_id),
+                )
+            attempt = int(attempts.get(user_id, 0)) + 1
+            attempts[user_id] = attempt
+            streak = daily_streak(daily, user_id)
+            if won:
+                players.append(user_id)
+                daily.setdefault("results", {})[user_id] = attempt
+                updated_streak = update_daily_streak(
+                    daily.get("streaks", {}).get(user_id), today
+                )
+                daily.setdefault("streaks", {})[user_id] = updated_streak
+                streak = updated_streak["count"]
             config.clues_store.set_daily_clues(daily)
-            return "ok", streak["count"]
+            return "ok", attempt, streak
 
     clues = discord.SlashCommandGroup("clues", "Adivina las pistas de una palabra")
 
@@ -168,11 +232,13 @@ class GuessClues(commands.Cog):
                 word = daily["target_word"]
                 target_criteria = set(daily["target_criteria"])
                 criteria = list(daily["criteria"])
+                attempts = int(daily.get("attempts", {}).get(str(ctx.author.id), 0))
             else:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                     word, entry = await random_entry(session)
                 target_criteria = matching_criteria(word, entry)
                 criteria = choose_round_criteria(target_criteria)
+                attempts = 0
         except (aiohttp.ClientError, TimeoutError, RaeApiError) as error:
             await ctx.respond(f"No pude iniciar la partida con RAE API: {error}", ephemeral=True)
             return
@@ -181,14 +247,14 @@ class GuessClues(commands.Cog):
             "target_criteria": target_criteria,
             "target_word": word,
             "resolved": set(),
-            "attempts": 0,
+            "attempts": attempts,
             "owner_id": ctx.author.id,
             "mode": modo,
             "daily_date": daily["date"] if modo == "diario" else None,
         }
         game = self.games[key]
         rules = (
-            "Tienes un único intento para encontrar una palabra que cumpla los tres criterios."
+            "Prueba palabras hasta encontrar una que cumpla los tres criterios."
             if modo == "diario"
             else "Descubre los tres criterios que cumple la palabra base. "
             "Cualquier palabra válida que cumpla los tres gana."
@@ -230,7 +296,7 @@ class GuessClues(commands.Cog):
         won = is_winning_guess(game, guess_criteria)
 
         if private:
-            attempt, streak = await self.claim_daily_attempt(game, ctx.author.id, won)
+            attempt, attempts, streak = await self.record_daily_attempt(game, ctx.author.id, won)
             if attempt != "ok":
                 del self.games[key]
                 message = (
@@ -242,7 +308,10 @@ class GuessClues(commands.Cog):
                 await ctx.respond(message, ephemeral=True)
                 return
 
-        game["attempts"] += 1
+        if private:
+            game["attempts"] = attempts
+        else:
+            game["attempts"] += 1
         newly_resolved = (
             guess_criteria & set(game["criteria"])
         ) - game["resolved"]
@@ -258,15 +327,20 @@ class GuessClues(commands.Cog):
         lines = [f"**{word.upper()}** — {result}", "", format_board(game)]
 
         if private:
-            lines.append(
-                "\n🎉 Cumpliste los tres criterios."
-                if won
-                else "\nNo cumpliste los tres criterios simultáneamente."
-            )
-            unit = "día" if streak == 1 else "días"
-            lines.append(f"\n🔥 Tu racha: **{streak} {unit}**.")
-            lines.append(f"\n{daily_wait_message()}")
-            del self.games[key]
+            if won:
+                lines.append("\n🎉 Cumpliste los tres criterios.")
+                attempt_unit = "intento" if game["attempts"] == 1 else "intentos"
+                lines.append(f"\n🎯 Lo resolviste en **{game['attempts']} {attempt_unit}**.")
+                unit = "día" if streak == 1 else "días"
+                lines.append(f"\n🔥 Tu racha: **{streak} {unit}**.")
+                lines.append(f"\n{daily_wait_message()}")
+                del self.games[key]
+            else:
+                lines.append(
+                    "\nNo cumpliste los tres criterios simultáneamente. "
+                    "Puedes volver a intentarlo."
+                )
+                lines.append(f"\nIntentos: **{game['attempts']}**.")
             await ctx.respond("\n".join(lines), ephemeral=True)
             return
 
@@ -337,9 +411,7 @@ def daily_streak(daily: dict, user_id: int | str) -> int:
     return int(daily.get("streaks", {}).get(str(user_id), {}).get("count", 0))
 
 
-def update_daily_streak(streak: dict | None, today: str, won: bool) -> dict:
-    if not won:
-        return {"count": 0}
+def update_daily_streak(streak: dict | None, today: str) -> dict:
     yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
     count = (
         int((streak or {}).get("count", 0)) + 1
@@ -347,6 +419,25 @@ def update_daily_streak(streak: dict | None, today: str, won: bool) -> dict:
         else 1
     )
     return {"count": count, "last_win": today}
+
+
+def format_daily_leaderboard(daily: dict) -> str:
+    day = daily.get("date", "")
+    word = str(daily.get("target_word") or "?").upper()
+    header = f"## 🏆 Ranking diario — {day}\nPalabra base: **{word}**"
+    results = daily.get("results", {})
+    if not results:
+        return f"{header}\n\nNadie resolvió el desafío."
+    groups = {}
+    for user_id, attempts in results.items():
+        groups.setdefault(int(attempts), []).append(str(user_id))
+    lines = [header]
+    medals = ("🥇", "🥈", "🥉")
+    for place, attempts in enumerate(sorted(groups)[:3]):
+        users = ", ".join(f"<@{user_id}>" for user_id in sorted(groups[attempts]))
+        unit = "intento" if attempts == 1 else "intentos"
+        lines.append(f"{medals[place]} **{place + 1}.º** {users} — **{attempts} {unit}**")
+    return "\n\n".join(lines)
 
 
 def normalize_word(value: str) -> str | None:

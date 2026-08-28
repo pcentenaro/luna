@@ -119,6 +119,86 @@ class AdminPanelView(discord.ui.View):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @discord.ui.button(label="Channel settings", style=discord.ButtonStyle.secondary, row=2)
+    async def channel_settings(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can configure channels.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            embed=build_channel_settings_embed(interaction.guild),
+            view=ChannelSettingsView(),
+            ephemeral=True,
+        )
+
+
+class ChannelSettingsView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.add_item(LeaderboardChannelSelect())
+
+    @discord.ui.button(label="Clear ranking channel", style=discord.ButtonStyle.danger, row=1)
+    async def clear_clues_ranking_channel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can clear the ranking channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+
+        deleted = config.config_store.clear_clues_leaderboard_channel_id(interaction.guild.id)
+        await refresh_channel_settings_response(interaction)
+        message = "Guess the Clues ranking channel cleared." if deleted else "No ranking channel was configured."
+        await interaction.followup.send(message, ephemeral=True)
+
+
+class LeaderboardChannelSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            select_type=discord.ComponentType.channel_select,
+            custom_id="admin:clues_leaderboard_channel",
+            placeholder="Choose the Guess the Clues ranking channel",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the ranking channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+
+        channel = self.values[0]
+        bot_member = interaction.guild.me
+        if bot_member is None or not channel.permissions_for(bot_member).send_messages:
+            await interaction.response.send_message("Luna cannot send messages in that channel.", ephemeral=True)
+            return
+
+        config.config_store.set_clues_leaderboard_channel_id(interaction.guild.id, channel.id)
+        await refresh_channel_settings_response(interaction)
+        await interaction.followup.send(f"Guess the Clues rankings will be posted in {channel.mention}.", ephemeral=True)
+
+
+def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
+    leaderboard_channel_id = config.config_store.get_clues_leaderboard_channel_id(guild.id)
+    leaderboard_channel_value = "Not configured"
+    if leaderboard_channel_id:
+        channel = guild.get_channel(leaderboard_channel_id)
+        leaderboard_channel_value = channel.mention if channel else f"Missing channel ID `{leaderboard_channel_id}`"
+
+    embed = discord.Embed(
+        title="Channel settings",
+        description="Choose where Luna posts automated messages.",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(name="Guess the Clues ranking", value=leaderboard_channel_value)
+    return embed
+
 
 def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     active_event = config.config_store.get_active_event()
@@ -420,6 +500,13 @@ async def refresh_admin_panel_response(interaction: discord.Interaction):
         return False
 
     return True
+
+
+async def refresh_channel_settings_response(interaction: discord.Interaction):
+    await interaction.response.edit_message(
+        embed=build_channel_settings_embed(interaction.guild),
+        view=ChannelSettingsView(),
+    )
 
 
 async def refresh_admin_panel(interaction: discord.Interaction):

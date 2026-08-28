@@ -116,6 +116,32 @@ class ConfigStore:
         self._save(data)
         return True
 
+    def get_clues_leaderboard_channel_id(self, guild_id: int) -> int | None:
+        channel_id = self._load().get("clues_leaderboard_channels", {}).get(str(guild_id))
+        return int(channel_id) if channel_id else None
+
+    def get_clues_leaderboard_channels(self) -> dict[int, int]:
+        channels = self._load().get("clues_leaderboard_channels", {})
+        return {int(guild_id): int(channel_id) for guild_id, channel_id in channels.items()}
+
+    def set_clues_leaderboard_channel_id(self, guild_id: int, channel_id: int):
+        data = self._load()
+        channels = data.setdefault("clues_leaderboard_channels", {})
+        channels[str(guild_id)] = str(channel_id)
+        self._save(data)
+
+    def clear_clues_leaderboard_channel_id(self, guild_id: int) -> bool:
+        data = self._load()
+        channels = data.get("clues_leaderboard_channels", {})
+        removed = channels.pop(str(guild_id), None)
+        if removed is None:
+            return False
+
+        if not channels:
+            data.pop("clues_leaderboard_channels", None)
+        self._save(data)
+        return True
+
     def get_active_event(self) -> dict | None:
         return self._load().get("active_event")
 

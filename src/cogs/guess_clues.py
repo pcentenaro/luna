@@ -90,13 +90,25 @@ class GuessClues(commands.Cog):
                 leaderboard = daily
             else:
                 return
-            channel = self.bot.get_channel(config.clues_leaderboard_channel_id)
-            if channel is None:
+            channels = config.config_store.get_clues_leaderboard_channels()
+            if not channels:
                 return
-            try:
-                await channel.send(format_daily_leaderboard(leaderboard))
-            except discord.HTTPException as error:
-                print(f"No pude publicar el leaderboard diario: {error}")
+            published_guilds = leaderboard.setdefault("published_guilds", [])
+            for guild_id, channel_id in channels.items():
+                if str(guild_id) in published_guilds:
+                    continue
+                channel = self.bot.get_channel(channel_id)
+                if channel is None:
+                    continue
+                try:
+                    await channel.send(format_daily_leaderboard(leaderboard))
+                except discord.HTTPException as error:
+                    print(f"No pude publicar el leaderboard diario en {guild_id}: {error}")
+                    continue
+                published_guilds.append(str(guild_id))
+
+            if not set(map(str, channels)).issubset(published_guilds):
+                config.clues_store.set_daily_clues(daily)
                 return
             if pending:
                 pending.pop(0)
@@ -123,6 +135,7 @@ class GuessClues(commands.Cog):
                     "date": daily.get("date"),
                     "target_word": daily.get("target_word"),
                     "results": daily.get("results", {}),
+                    "published_guilds": daily.get("published_guilds", []),
                 })
             daily = {
                 "date": today,
@@ -135,6 +148,7 @@ class GuessClues(commands.Cog):
                 "streaks": daily.get("streaks", {}) if daily else {},
                 "pending_leaderboards": pending,
                 "leaderboard_published": False,
+                "published_guilds": [],
             }
             config.clues_store.set_daily_clues(daily)
             return daily

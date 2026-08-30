@@ -12,5 +12,5 @@ cursor = connection.cursor()
 
 for key in links:
     row = links[key]
-    cursor.execute(f"INSERT INTO links VALUES({row["discord_user_id"]}, {row["startgg_player_id"]}, \"{row["startgg_gamer_tag"]}\", \"{row["startgg_prefix"]}\", \"{row["updated_at"]}\")")
+    cursor.execute(f"INSERT INTO links VALUES({row["startgg_player_id"]}, {row["discord_user_id"]}, \"{row["startgg_gamer_tag"]}\", \"{row["startgg_prefix"]}\", \"{row["updated_at"]}\")")
     connection.commit()

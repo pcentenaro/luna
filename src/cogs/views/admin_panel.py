@@ -149,7 +149,7 @@ class ChannelSettingsView(discord.ui.View):
             await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
             return
 
-        deleted = config.config_store.clear_clues_leaderboard_channel_id(interaction.guild.id)
+        deleted = config.clues_store.clear_leaderboard_channel_id(interaction.guild.id)
         await refresh_channel_settings_response(interaction)
         message = "Guess the Clues ranking channel cleared." if deleted else "No ranking channel was configured."
         await interaction.followup.send(message, ephemeral=True)
@@ -179,13 +179,13 @@ class LeaderboardChannelSelect(discord.ui.Select):
             await interaction.response.send_message("Luna cannot send messages in that channel.", ephemeral=True)
             return
 
-        config.config_store.set_clues_leaderboard_channel_id(interaction.guild.id, channel.id)
+        config.clues_store.set_leaderboard_channel_id(interaction.guild.id, channel.id)
         await refresh_channel_settings_response(interaction)
         await interaction.followup.send(f"Guess the Clues rankings will be posted in {channel.mention}.", ephemeral=True)
 
 
 def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
-    leaderboard_channel_id = config.config_store.get_clues_leaderboard_channel_id(guild.id)
+    leaderboard_channel_id = config.clues_store.get_leaderboard_channel_id(guild.id)
     leaderboard_channel_value = "Not configured"
     if leaderboard_channel_id:
         channel = guild.get_channel(leaderboard_channel_id)

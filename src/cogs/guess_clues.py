@@ -90,7 +90,7 @@ class GuessClues(commands.Cog):
                 leaderboard = daily
             else:
                 return
-            channels = config.config_store.get_clues_leaderboard_channels()
+            channels = config.clues_store.get_leaderboard_channels()
             if not channels:
                 return
             published_guilds = leaderboard.setdefault("published_guilds", [])

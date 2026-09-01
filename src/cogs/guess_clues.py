@@ -308,6 +308,9 @@ class GuessClues(commands.Cog):
             return
         guess_criteria = matching_criteria(word, entry)
         won = is_winning_guess(game, guess_criteria)
+        has_invalid_criterion = not won and (
+            set(game["criteria"]) & game["target_criteria"]
+        ) <= guess_criteria
 
         if private:
             attempt, attempts, streak = await self.record_daily_attempt(game, ctx.author.id, won)
@@ -349,6 +352,12 @@ class GuessClues(commands.Cog):
                 lines.append(f"\n🔥 Tu racha: **{streak} {unit}**.")
                 lines.append(f"\n{daily_wait_message()}")
                 del self.games[key]
+            elif has_invalid_criterion:
+                lines.append(
+                    "\nCumple los tres criterios correctos, pero también "
+                    "algún criterio incorrecto. Prueba otra palabra."
+                )
+                lines.append(f"\nIntentos: **{game['attempts']}**.")
             else:
                 lines.append(
                     "\nNo cumpliste los tres criterios simultáneamente. "
@@ -365,6 +374,11 @@ class GuessClues(commands.Cog):
                 f"**{game['target_word'].upper()}**."
             )
             del self.games[key]
+        elif has_invalid_criterion:
+            lines.append(
+                "\nCumple los tres criterios correctos, pero también "
+                "algún criterio incorrecto. Prueba otra palabra."
+            )
         elif remaining:
             lines.append(f"\nQuedan **{len(remaining)}** criterios correctos por descubrir.")
         else:
@@ -557,7 +571,7 @@ def remaining_correct_criteria(game: dict) -> set[str]:
 
 
 def is_winning_guess(game: dict, guess_criteria: set[str]) -> bool:
-    return (set(game["criteria"]) & game["target_criteria"]) <= guess_criteria
+    return set(game["criteria"]) & guess_criteria == set(game["criteria"]) & game["target_criteria"]
 
 
 async def random_entry(session: aiohttp.ClientSession) -> tuple[str, dict]:

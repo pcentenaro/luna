@@ -306,6 +306,8 @@ class GuessClues(commands.Cog):
         if entry is None:
             await ctx.respond(f"`{word}` no aparece en el diccionario.", ephemeral=private)
             return
+        if game["mode"] == "cooperativo":
+            game.setdefault("participants", set()).add(ctx.author.id)
         guess_criteria = matching_criteria(word, entry)
         won = is_winning_guess(game, guess_criteria)
         has_invalid_criterion = not won and (
@@ -368,8 +370,11 @@ class GuessClues(commands.Cog):
             return
 
         if won:
+            players = game.get("participants", {ctx.author.id})
+            mentions = " ".join(f"<@{user_id}>" for user_id in sorted(players))
+            verb = "resolvieron" if len(players) > 1 else "resolvió"
             lines.append(
-                f"\n🎉 {ctx.author.mention} resolvió el tablero en "
+                f"\n🎉 {mentions} {verb} el tablero en "
                 f"{game['attempts']} intentos. Palabra base: "
                 f"**{game['target_word'].upper()}**."
             )

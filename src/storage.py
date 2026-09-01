@@ -88,6 +88,12 @@ class CluesStore:
                 CREATE TABLE IF NOT EXISTS clues_migrations (
                     name TEXT PRIMARY KEY
                 );
+                CREATE TABLE IF NOT EXISTS clues_results (
+                    user_id INTEGER NOT NULL,
+                    mode TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    completed_at TEXT NOT NULL
+                );
                 """
             )
             self._migrate_json(connection, legacy_clues_path, legacy_config_path)
@@ -106,6 +112,36 @@ class CluesStore:
                 (data,),
             )
 
+    def record_clues_results(self, user_ids, mode: str, attempts: int):
+        completed_at = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (int(user_id), mode, int(attempts), completed_at)
+            for user_id in user_ids
+        ]
+        with sqlite3.connect(self.database_path) as connection:
+            connection.executemany(
+                "INSERT INTO clues_results VALUES (?, ?, ?, ?)",
+                rows,
+            )
+
+    def get_clues_stats(self, user_id: int) -> dict:
+        with sqlite3.connect(self.database_path) as connection:
+            completed, average, best = connection.execute(
+                "SELECT COUNT(*), AVG(attempts), MIN(attempts) "
+                "FROM clues_results WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            modes = dict(connection.execute(
+                "SELECT mode, COUNT(*) FROM clues_results "
+                "WHERE user_id = ? GROUP BY mode",
+                (user_id,),
+            ).fetchall())
+        return {
+            "completed": completed,
+            "average_attempts": average,
+            "best_attempts": best,
+            "modes": modes,
+        }
     def get_leaderboard_channel_id(self, guild_id: int) -> int | None:
         with sqlite3.connect(self.database_path) as connection:
             row = connection.execute(

@@ -343,6 +343,10 @@ class GuessClues(commands.Cog):
         remaining = remaining_correct_criteria(game)
         if won:
             game["resolved"].update(game["criteria"])
+            players = game.get("participants", {ctx.author.id})
+            config.clues_store.record_clues_results(
+                players, game["mode"], game["attempts"]
+            )
         lines = [f"**{word.upper()}** — {result}", "", format_board(game)]
 
         if private:
@@ -370,7 +374,6 @@ class GuessClues(commands.Cog):
             return
 
         if won:
-            players = game.get("participants", {ctx.author.id})
             mentions = " ".join(f"<@{user_id}>" for user_id in sorted(players))
             verb = "resolvieron" if len(players) > 1 else "resolvió"
             lines.append(
@@ -389,6 +392,52 @@ class GuessClues(commands.Cog):
         else:
             lines.append("\nYa conoces los tres criterios. Prueba una palabra que cumpla los tres a la vez.")
         await ctx.respond("\n".join(lines))
+    @clues.command(name="stats", description="Muestra estadísticas de Guess the Clues")
+    async def stats(
+        self,
+        ctx: discord.ApplicationContext,
+        usuario: discord.Member = discord.Option(
+            discord.Member,
+            description="Jugador que quieres consultar",
+            required=False,
+            default=None,
+        ),
+    ):
+        user = usuario or ctx.author
+        player_stats = config.clues_store.get_clues_stats(user.id)
+        if not player_stats["completed"]:
+            await ctx.respond(
+                f"{user.mention} todavía no tiene estadísticas de Guess the Clues."
+            )
+            return
+
+        daily = config.clues_store.get_daily_clues() or {}
+        streak = daily.get("streaks", {}).get(str(user.id), {})
+        today, _ = daily_window()
+        yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+        current_streak = (
+            int(streak.get("count", 0))
+            if streak.get("last_win") in (today, yesterday)
+            else 0
+        )
+        best_streak = int(streak.get("best", streak.get("count", 0)))
+        modes = player_stats["modes"]
+        best_unit = (
+            "intento" if player_stats["best_attempts"] == 1 else "intentos"
+        )
+        await ctx.respond(
+            f"## 📊 Estadísticas de {user.mention}\n\n"
+            f"🎮 Partidas completadas: **{player_stats['completed']}**\n"
+            f"🎯 Promedio para resolver: **{player_stats['average_attempts']:.1f} intentos**\n"
+            f"⭐ Mejor resultado: **{player_stats['best_attempts']} {best_unit}**\n"
+            f"🔥 Racha actual: **{current_streak} días**\n"
+            f"👑 Mejor racha: **{best_streak} días**\n\n"
+            "**Por modo:**\n"
+            f"• Individual: **{modes.get('individual', 0)}**\n"
+            f"• Cooperativo: **{modes.get('cooperativo', 0)}**\n"
+            f"• Diario: **{modes.get('diario', 0)}**"
+        )
+
 
     @clues.command(name="status", description="Muestra las pistas descubiertas")
     async def status(self, ctx: discord.ApplicationContext):
@@ -451,7 +500,8 @@ def update_daily_streak(streak: dict | None, today: str) -> dict:
         if (streak or {}).get("last_win") == yesterday
         else 1
     )
-    return {"count": count, "last_win": today}
+    best = max(int((streak or {}).get("best", (streak or {}).get("count", 0))), count)
+    return {"count": count, "best": best, "last_win": today}
 
 
 def format_daily_leaderboard(daily: dict) -> str:

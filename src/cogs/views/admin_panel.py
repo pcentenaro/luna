@@ -453,14 +453,14 @@ class SetEventModal(discord.ui.Modal):
         self.add_item(
             discord.ui.InputText(
                 label="Tournament slug",
-                placeholder="torneo-pruebas-bot-luna",
+                value="copa-luna-xx",
                 required=True,
             )
         )
         self.add_item(
             discord.ui.InputText(
                 label="Event slug",
-                placeholder="puyo-singles",
+                value="puyo-singles",
                 required=True,
             )
         )

@@ -44,6 +44,9 @@ async def sync_participant_role(
             except discord.NotFound:
                 result["missing"] += 1
                 continue
+            except (discord.Forbidden, discord.HTTPException):
+                result["failed"] += 1
+                continue
 
         if role in member.roles:
             result["already"] += 1
@@ -52,6 +55,45 @@ async def sync_participant_role(
         try:
             await member.add_roles(role, reason=f"Registered for {active_event['event_name']} on start.gg")
             result["assigned"] += 1
+        except (discord.Forbidden, discord.HTTPException):
+            result["failed"] += 1
+
+    return result
+
+
+async def remove_participant_roles(guild: discord.Guild | None) -> dict | None:
+    active_event = config.config_store.get_active_event()
+    role_id = config.config_store.get_participant_role_id()
+    if guild is None or active_event is None or role_id is None or config.startgg_client is None:
+        return None
+
+    role = guild.get_role(role_id)
+    if role is None:
+        return None
+
+    entrants = await config.startgg_client.get_event_entrants(active_event["event_id"])
+    user_ids = get_registered_discord_user_ids(entrants, config.link_store.get_all_startgg_links())
+    result = {"matched": len(user_ids), "removed": 0, "absent": 0, "missing": 0, "failed": 0}
+
+    for user_id in user_ids:
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.NotFound:
+                result["missing"] += 1
+                continue
+            except (discord.Forbidden, discord.HTTPException):
+                result["failed"] += 1
+                continue
+
+        if role not in member.roles:
+            result["absent"] += 1
+            continue
+
+        try:
+            await member.remove_roles(role, reason=f"Cleared {active_event['event_name']} start.gg event")
+            result["removed"] += 1
         except (discord.Forbidden, discord.HTTPException):
             result["failed"] += 1
 

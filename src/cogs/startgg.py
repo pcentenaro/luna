@@ -51,9 +51,9 @@ class Startgg(commands.Cog):
 
 
     @startgg.command(
-            name="account",
-            description="Display and edit your linked smash.gg account"
-    )
+                name="account",
+                description="Display and edit your linked smash.gg account"
+        )
     async def account(self, ctx: discord.ApplicationContext, user: discord.Member = None):
         user = user if user is not None else ctx.user
         account_info = config.link_store.get_startgg_link(user.id)
@@ -62,17 +62,25 @@ class Startgg(commands.Cog):
             return
 
         with EventDataStore("data/luna.db") as event_data_store:
-            placements = event_data_store.get_player_podium_history(user.id)
+            placements = event_data_store.get_player_podium_summary(user.id)
+            set_summary = event_data_store.get_player_set_summary(user.id)
+            rating = event_data_store.get_player_glicko_rating(user.id)
 
         account_embed = discord.Embed(
                 title=f"start.gg account for {user.display_name}",
                 thumbnail=user.display_avatar.url,
                 fields=[
-                    discord.EmbedField("account name", account_info["startgg_gamer_tag"], inline=True),
-                    discord.EmbedField("account ID", account_info["startgg_player_id"], inline=True),
-                    discord.EmbedField("updated on", str(datetime.fromisoformat(account_info["updated_at"]).date()), inline=True),
-                    discord.EmbedField("Tournaments (relative)", f"🥇 {placements["relative_first_places"]} 🥈 {placements["relative_second_places"]} 🥉 {placements["relative_third_places"]} 🏅 {placements["relative_other_places"]}", inline=False),
-                    discord.EmbedField("Tournaments (absolute)", f"🥇 {placements["absolute_first_places"]} 🥈 {placements["absolute_second_places"]} 🥉 {placements["absolute_third_places"]} 🏅 {placements["absolute_other_places"]}", inline=True)
+                    discord.EmbedField("Account Name", account_info["startgg_gamer_tag"], inline=True),
+                    discord.EmbedField("Account ID", account_info["startgg_player_id"], inline=True),
+                    discord.EmbedField("Updated On", str(datetime.fromisoformat(account_info["updated_at"]).date()), inline=True),
+                    discord.EmbedField("", "", inline=False),
+                    discord.EmbedField("Rating", f"{rating["rating"]} (#{rating["rank"]})", inline=True),
+                    discord.EmbedField("Results (Top Bracket)", f"🥇 {placements["absolute_first_places"]} 🥈 {placements["absolute_second_places"]} 🥉 {placements["absolute_third_places"]}", inline=True),
+                    discord.EmbedField("Results (All Brackets)", f"🥇 {placements["relative_first_places"]} 🥈 {placements["relative_second_places"]} 🥉 {placements["relative_third_places"]}", inline=True),
+                    discord.EmbedField("", "", inline=False),
+                    discord.EmbedField("Events Played", f"{placements["relative_first_places"] + placements["relative_second_places"] + placements["relative_third_places"] + placements["relative_other_places"]}", inline=True),
+                    discord.EmbedField("Sets Played", f"{set_summary["set_count"]} ({round(set_summary["pct_set_win_rate"])}% wins)", inline=True),
+                    discord.EmbedField("Rounds Played", f"{set_summary["round_count"]} ({round(set_summary["pct_round_win_rate"])}% wins)", inline=True)
                 ]
             )
         if user.id == ctx.user.id:

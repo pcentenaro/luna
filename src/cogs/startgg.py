@@ -5,7 +5,7 @@ from datetime import datetime
 from datetime import timezone
 from discord.ext import commands
 from startgg import StartGGClient, StartGGError
-from storage import LinkStore
+from storage import LinkStore, EventDataStore
 
 
 class Startgg(commands.Cog):
@@ -51,30 +51,47 @@ class Startgg(commands.Cog):
 
 
     @startgg.command(
-            name="account",
-            description="Display and edit your linked smash.gg account"
-    )
-    async def account(self, ctx: discord.ApplicationContext):
-        account_info = config.link_store.get_startgg_link(ctx.user.id)
+                name="account",
+                description="Display and edit your linked smash.gg account"
+        )
+    async def account(self, ctx: discord.ApplicationContext, user: discord.Member = None):
+        user = user if user is not None else ctx.user
+        account_info = config.link_store.get_startgg_link(user.id)
         if account_info is None:
             await ctx.respond("You don't have a start.gg account linked yet. Use `/link` to connect one.", ephemeral=True)
             return
 
+        with EventDataStore("data/luna.db") as event_data_store:
+            placements = event_data_store.get_player_podium_summary(user.id)
+            set_summary = event_data_store.get_player_set_summary(user.id)
+            rating = event_data_store.get_player_glicko_rating(user.id)
+
         account_embed = discord.Embed(
-                title=f"start.gg account for {ctx.user.display_name}",
-                thumbnail=ctx.user.display_avatar.url,
+                title=f"start.gg account for {user.display_name}",
+                thumbnail=user.display_avatar.url,
                 fields=[
-                    discord.EmbedField("account name", account_info["startgg_gamer_tag"], inline=True),
-                    discord.EmbedField("account ID", account_info["startgg_player_id"], inline=True),
-                    discord.EmbedField("updated on", str(datetime.fromisoformat(account_info["updated_at"]).date()), inline=True)
+                    discord.EmbedField("Account Name", account_info["startgg_gamer_tag"], inline=True),
+                    discord.EmbedField("Account ID", account_info["startgg_player_id"], inline=True),
+                    discord.EmbedField("Updated On", str(datetime.fromisoformat(account_info["updated_at"]).date()), inline=True),
+                    discord.EmbedField("", "", inline=False),
+                    discord.EmbedField("Rating", f"{rating["rating"]} (#{rating["rank"]})", inline=True),
+                    discord.EmbedField("Results (Top Bracket)", f"🥇 {placements["absolute_first_places"]} 🥈 {placements["absolute_second_places"]} 🥉 {placements["absolute_third_places"]}", inline=True),
+                    discord.EmbedField("Results (All Brackets)", f"🥇 {placements["relative_first_places"]} 🥈 {placements["relative_second_places"]} 🥉 {placements["relative_third_places"]}", inline=True),
+                    discord.EmbedField("", "", inline=False),
+                    discord.EmbedField("Events Played", f"{placements["relative_first_places"] + placements["relative_second_places"] + placements["relative_third_places"] + placements["relative_other_places"]}", inline=True),
+                    discord.EmbedField("Sets Played", f"{set_summary["set_count"]} ({round(set_summary["pct_set_win_rate"])}% wins)", inline=True),
+                    discord.EmbedField("Rounds Played", f"{set_summary["round_count"]} ({round(set_summary["pct_round_win_rate"])}% wins)", inline=True)
                 ]
             )
-        view = self.AccountCommandUnlinkAccountView(ctx.user.id, timeout=30)
-        response = await ctx.respond(
-            embed=account_embed,
-            view=view
-        )
-        view.message = await response.original_response()
+        if user.id == ctx.user.id:
+            view = self.AccountCommandUnlinkAccountView(user.id, timeout=30)
+            response = await ctx.respond(
+                embed=account_embed,
+                view=view
+            )
+            view.message = await response.original_response()
+        else:
+            response = await ctx.respond(embed=account_embed)
         return
 
 

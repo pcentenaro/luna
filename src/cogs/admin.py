@@ -1,7 +1,9 @@
 import config
 import discord
-from cogs.views.admin_panel import AdminPanelView, build_admin_panel_embed
+from cogs.views.admin_panel import AdminPanelView, build_admin_panel_embed, format_role_sync_result
 from discord.ext import commands
+from participant_role import sync_participant_role
+from startgg import StartGGError
 
 
 class Admin(commands.Cog):
@@ -24,6 +26,25 @@ class Admin(commands.Cog):
             embed=build_admin_panel_embed(ctx.guild),
             view=AdminPanelView(),
         )
+
+    @commands.command(name="ref")
+    @commands.guild_only()
+    async def refresh_participant_roles(self, ctx: commands.Context):
+        if not is_luna_admin(ctx):
+            await ctx.send("Only Luna admins can refresh participant roles.")
+            return
+
+        try:
+            result = await sync_participant_role(ctx.guild)
+        except StartGGError as error:
+            await ctx.send(f"Could not refresh participant roles: {error}")
+            return
+
+        if result is None:
+            await ctx.send("Configure an active event and participant role first.")
+            return
+
+        await ctx.send(f"Participant roles refreshed.{format_role_sync_result(result)}")
 
 
 def setup(bot):

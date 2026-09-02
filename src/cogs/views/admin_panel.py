@@ -1,7 +1,7 @@
 import discord
 
 import config
-from participant_role import sync_participant_role
+from participant_role import remove_participant_roles, sync_participant_role
 from startgg import StartGGError, format_user_display_name
 
 
@@ -26,10 +26,30 @@ class AdminPanelView(discord.ui.View):
             await interaction.response.send_message("Only Luna admins can clear the active event.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True)
+        try:
+            removal_result = await remove_participant_roles(interaction.guild)
+        except StartGGError as error:
+            await interaction.followup.send(
+                f"Could not remove participant roles, so the event was not cleared: {error}",
+                ephemeral=True,
+            )
+            return
+
+        if removal_result and removal_result["failed"]:
+            await interaction.followup.send(
+                f"Could not remove {removal_result['failed']} participant role(s), so the event was not cleared.",
+                ephemeral=True,
+            )
+            return
+
         deleted = config.config_store.clear_active_event()
-        await refresh_admin_panel_response(interaction)
+        await refresh_admin_panel(interaction)
         if deleted:
-            await interaction.followup.send("Active start.gg event cleared.", ephemeral=True)
+            await interaction.followup.send(
+                f"Active start.gg event cleared.{format_role_removal_result(removal_result)}",
+                ephemeral=True,
+            )
             return
 
         await interaction.followup.send("No active start.gg event was configured.", ephemeral=True)
@@ -685,6 +705,16 @@ def format_role_sync_result(result: dict | None) -> str:
     return (
         f" Assigned to {result['assigned']} linked participant(s); "
         f"{result['already']} already had it, {result['missing']} are not in this server, "
+        f"and {result['failed']} failed."
+    )
+
+
+def format_role_removal_result(result: dict | None) -> str:
+    if result is None:
+        return ""
+    return (
+        f" Removed from {result['removed']} linked participant(s); "
+        f"{result['absent']} did not have it, {result['missing']} are not in this server, "
         f"and {result['failed']} failed."
     )
 

@@ -704,7 +704,8 @@ def format_role_sync_result(result: dict | None) -> str:
         return ""
     return (
         f" Assigned to {result['assigned']} linked participant(s); "
-        f"{result['already']} already had it, {result['missing']} are not in this server, "
+        f"{result['already']} already had it, {result['removed']} removed, "
+        f"{result['missing']} are not in this server, "
         f"and {result['failed']} failed."
     )
 

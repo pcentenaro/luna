@@ -31,22 +31,46 @@ async def sync_participant_role(
         return None
 
     entrants = await config.startgg_client.get_event_entrants(active_event["event_id"])
-    user_ids = get_registered_discord_user_ids(entrants, config.link_store.get_all_startgg_links())
+    links = config.link_store.get_all_startgg_links()
+    registered_user_ids = get_registered_discord_user_ids(entrants, links)
     if discord_user_id is not None:
-        user_ids &= {discord_user_id}
+        user_ids = {discord_user_id}
+        registered_user_ids &= user_ids
+    else:
+        user_ids = {int(link["discord_user_id"]) for link in links}
 
-    result = {"matched": len(user_ids), "assigned": 0, "already": 0, "missing": 0, "failed": 0}
+    result = {
+        "matched": len(registered_user_ids),
+        "assigned": 0,
+        "already": 0,
+        "removed": 0,
+        "missing": 0,
+        "failed": 0,
+    }
     for user_id in user_ids:
         member = guild.get_member(user_id)
         if member is None:
             try:
                 member = await guild.fetch_member(user_id)
             except discord.NotFound:
-                result["missing"] += 1
+                if user_id in registered_user_ids:
+                    result["missing"] += 1
                 continue
             except (discord.Forbidden, discord.HTTPException):
                 result["failed"] += 1
                 continue
+
+        if user_id not in registered_user_ids:
+            if role in member.roles:
+                try:
+                    await member.remove_roles(
+                        role,
+                        reason=f"No longer registered for {active_event['event_name']} on start.gg",
+                    )
+                    result["removed"] += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    result["failed"] += 1
+            continue
 
         if role in member.roles:
             result["already"] += 1

@@ -239,6 +239,15 @@ class ConfigStore:
         self._save(data)
         return True
 
+    def get_participant_role_id(self) -> int | None:
+        role_id = self._load().get("participant_role_id")
+        return int(role_id) if role_id else None
+
+    def set_participant_role_id(self, role_id: int):
+        data = self._load()
+        data["participant_role_id"] = str(role_id)
+        self._save(data)
+
     def get_active_event(self) -> dict | None:
         return self._load().get("active_event")
 

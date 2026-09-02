@@ -4,8 +4,8 @@ import discord
 from datetime import datetime
 from datetime import timezone
 from discord.ext import commands
+from participant_role import sync_participant_role
 from startgg import StartGGClient, StartGGError
-from storage import LinkStore
 
 
 class Startgg(commands.Cog):
@@ -832,7 +832,7 @@ class LinkStartggAccountModal(discord.ui.Modal):
 
         try:
             player = await find_startgg_player(player_reference)
-            if LinkStore().get_startgg_link_by_player_id(player["id"]) is not None:
+            if config.link_store.get_startgg_link_by_player_id(player["id"]) is not None:
                 await interaction.followup.send("This start.gg account is already linked to a Discord profile.", ephemeral=True)
                 return
         except StartGGError as error:
@@ -849,8 +849,15 @@ class LinkStartggAccountModal(discord.ui.Modal):
             gamer_tag=player.get("gamerTag"),
             prefix=player.get("prefix"),
         )
+        try:
+            sync_result = await sync_participant_role(interaction.guild, interaction.user.id)
+        except StartGGError:
+            sync_result = None
+        role_message = ""
+        if sync_result and sync_result["assigned"]:
+            role_message = " Your tournament participant role was also assigned."
         await interaction.followup.send(
-            f"Linked your Discord account to {format_startgg_player(player)}.",
+            f"Linked your Discord account to {format_startgg_player(player)}.{role_message}",
             ephemeral=True,
         )
 

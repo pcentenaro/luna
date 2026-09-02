@@ -1,6 +1,7 @@
 import discord
 
 import config
+from participant_role import sync_participant_role
 from startgg import StartGGError, format_user_display_name
 
 
@@ -75,6 +76,18 @@ class AdminPanelView(discord.ui.View):
             return
 
         await interaction.followup.send("No Luna admin role was configured.", ephemeral=True)
+
+    @discord.ui.button(label="Set participant role", style=discord.ButtonStyle.primary, row=1)
+    async def set_participant_role(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the participant role.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            "Choose an existing server role for registered tournament participants.",
+            view=ParticipantRoleView(interaction.message),
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="Set score targets", style=discord.ButtonStyle.primary, row=2)
     async def set_score_targets(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -155,6 +168,60 @@ class ChannelSettingsView(discord.ui.View):
         await interaction.followup.send(message, ephemeral=True)
 
 
+class ParticipantRoleView(discord.ui.View):
+    def __init__(self, panel_message: discord.Message | None):
+        super().__init__(timeout=300)
+        self.add_item(ParticipantRoleSelect(panel_message))
+
+
+class ParticipantRoleSelect(discord.ui.Select):
+    def __init__(self, panel_message: discord.Message | None):
+        self.panel_message = panel_message
+        super().__init__(
+            select_type=discord.ComponentType.role_select,
+            custom_id="admin:participant_role",
+            placeholder="Choose the tournament participant role",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the participant role.", ephemeral=True)
+            return
+
+        role = self.values[0]
+        bot_member = interaction.guild.me if interaction.guild else None
+        if role.is_default() or role.managed or bot_member is None or role >= bot_member.top_role:
+            await interaction.response.send_message(
+                "Luna cannot assign that role. Move Luna above it and choose a regular server role.",
+                ephemeral=True,
+            )
+            return
+
+        config.config_store.set_participant_role_id(role.id)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            sync_result = await sync_participant_role(interaction.guild)
+        except StartGGError as error:
+            sync_result = None
+            sync_error = f" Could not sync start.gg attendees: {error}"
+        else:
+            sync_error = ""
+
+        if self.panel_message:
+            try:
+                await self.panel_message.edit(
+                    embed=build_admin_panel_embed(interaction.guild),
+                    view=AdminPanelView(),
+                )
+            except (discord.Forbidden, discord.NotFound):
+                pass
+
+        await interaction.followup.send(
+            f"Tournament participant role set to {role.mention}.{format_role_sync_result(sync_result)}{sync_error}",
+            ephemeral=True,
+        )
+
+
 class LeaderboardChannelSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
@@ -203,6 +270,7 @@ def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
 def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     active_event = config.config_store.get_active_event()
     admin_role_id = config.config_store.get_admin_role_id()
+    participant_role_id = config.config_store.get_participant_role_id()
     score_targets = config.config_store.get_score_targets()
 
     event_value = "Not configured"
@@ -218,6 +286,11 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
         role = guild.get_role(admin_role_id) if guild else None
         admin_role_value = role.mention if role else f"Missing role ID `{admin_role_id}`"
 
+    participant_role_value = "Not configured"
+    if participant_role_id:
+        role = guild.get_role(participant_role_id) if guild else None
+        participant_role_value = role.mention if role else f"Missing role ID `{participant_role_id}`"
+
     startgg_value = "Configured" if config.startgg_client else "STARTGG_API_KEY missing"
 
     embed = discord.Embed(
@@ -228,6 +301,7 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     embed.set_thumbnail(url=LUNA_AVATAR_URL)
     embed.add_field(name="Active event", value=event_value, inline=False)
     embed.add_field(name="Admin role", value=admin_role_value, inline=True)
+    embed.add_field(name="Participant role", value=participant_role_value, inline=True)
     embed.add_field(name="Start.gg", value=startgg_value, inline=True)
     embed.add_field(
         name="Score targets",
@@ -398,9 +472,16 @@ class SetEventModal(discord.ui.Modal):
             event_id=int(event["id"]),
             event_name=event["name"],
         )
+        try:
+            sync_result = await sync_participant_role(interaction.guild)
+        except StartGGError as error:
+            sync_result = None
+            sync_error = f" Could not sync participant roles: {error}"
+        else:
+            sync_error = ""
         await refresh_admin_panel(interaction)
         await interaction.followup.send(
-            f"Active event set to {event['name']} (`{full_event_slug}`).",
+            f"Active event set to {event['name']} (`{full_event_slug}`).{format_role_sync_result(sync_result)}{sync_error}",
             ephemeral=True,
         )
 
@@ -596,6 +677,16 @@ def normalize_role_name(value: str) -> str:
     if value.startswith("@"):
         value = value[1:]
     return value.strip()
+
+
+def format_role_sync_result(result: dict | None) -> str:
+    if result is None:
+        return ""
+    return (
+        f" Assigned to {result['assigned']} linked participant(s); "
+        f"{result['already']} already had it, {result['missing']} are not in this server, "
+        f"and {result['failed']} failed."
+    )
 
 
 def build_event_slug(tournament_slug: str, event_slug: str) -> str:

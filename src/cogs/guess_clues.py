@@ -135,6 +135,7 @@ class GuessClues(commands.Cog):
                     "date": daily.get("date"),
                     "target_word": daily.get("target_word"),
                     "results": daily.get("results", {}),
+                    "winning_words": daily.get("winning_words", {}),
                     "published_guilds": daily.get("published_guilds", []),
                 })
             daily = {
@@ -145,6 +146,7 @@ class GuessClues(commands.Cog):
                 "players": [],
                 "attempts": {},
                 "results": {},
+                "winning_words": {},
                 "streaks": daily.get("streaks", {}) if daily else {},
                 "pending_leaderboards": pending,
                 "leaderboard_published": False,
@@ -154,7 +156,7 @@ class GuessClues(commands.Cog):
             return daily
 
     async def record_daily_attempt(
-        self, game: dict, user_id: int, won: bool
+        self, game: dict, user_id: int, won: bool, word: str
     ) -> tuple[str, int, int]:
         today, _ = daily_window()
         async with self.daily_lock:
@@ -180,6 +182,7 @@ class GuessClues(commands.Cog):
             if won:
                 players.append(user_id)
                 daily.setdefault("results", {})[user_id] = attempt
+                daily.setdefault("winning_words", {})[user_id] = word
                 updated_streak = update_daily_streak(
                     daily.get("streaks", {}).get(user_id), today
                 )
@@ -315,7 +318,9 @@ class GuessClues(commands.Cog):
         ) <= guess_criteria
 
         if private:
-            attempt, attempts, streak = await self.record_daily_attempt(game, ctx.author.id, won)
+            attempt, attempts, streak = await self.record_daily_attempt(
+                game, ctx.author.id, won, word
+            )
             if attempt != "ok":
                 del self.games[key]
                 message = (
@@ -509,6 +514,7 @@ def format_daily_leaderboard(daily: dict) -> str:
     word = str(daily.get("target_word") or "?").upper()
     header = f"## 🏆 Ranking diario — {day}\nPalabra base: **{word}**"
     results = daily.get("results", {})
+    winning_words = daily.get("winning_words", {})
     if not results:
         return f"{header}\n\nNadie resolvió el desafío."
     groups = {}
@@ -517,7 +523,12 @@ def format_daily_leaderboard(daily: dict) -> str:
     lines = [header]
     medals = ("🥇", "🥈", "🥉")
     for place, attempts in enumerate(sorted(groups)[:3]):
-        users = ", ".join(f"<@{user_id}>" for user_id in sorted(groups[attempts]))
+        users = ", ".join(
+            f"<@{user_id}> (**{winning_words[str(user_id)].upper()}**)"
+            if str(user_id) in winning_words
+            else f"<@{user_id}>"
+            for user_id in sorted(groups[attempts])
+        )
         unit = "intento" if attempts == 1 else "intentos"
         lines.append(f"{medals[place]} **{place + 1}.º** {users} — **{attempts} {unit}**")
     return "\n\n".join(lines)

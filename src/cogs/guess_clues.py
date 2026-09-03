@@ -444,6 +444,17 @@ class GuessClues(commands.Cog):
         )
 
 
+    @clues.command(name="ranking", description="Muestra el ranking diario sin revelar palabras")
+    async def ranking(self, ctx: discord.ApplicationContext):
+        today, _ = daily_window()
+        daily = config.clues_store.get_daily_clues() or {}
+        if daily.get("date") != today:
+            daily = {"date": today}
+        await ctx.respond(
+            format_daily_leaderboard(daily, reveal_words=False),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @clues.command(name="status", description="Muestra las pistas descubiertas")
     async def status(self, ctx: discord.ApplicationContext):
         key = find_game_key(self.games, ctx.channel.id, ctx.author.id)
@@ -509,10 +520,12 @@ def update_daily_streak(streak: dict | None, today: str) -> dict:
     return {"count": count, "best": best, "last_win": today}
 
 
-def format_daily_leaderboard(daily: dict) -> str:
+def format_daily_leaderboard(daily: dict, *, reveal_words: bool = True) -> str:
     day = daily.get("date", "")
-    word = str(daily.get("target_word") or "?").upper()
-    header = f"## 🏆 Ranking diario — {day}\nPalabra base: **{word}**"
+    header = f"## 🏆 Ranking diario — {day}"
+    if reveal_words:
+        word = str(daily.get("target_word") or "?").upper()
+        header += f"\nPalabra base: **{word}**"
     results = daily.get("results", {})
     winning_words = daily.get("winning_words", {})
     if not results:
@@ -525,7 +538,7 @@ def format_daily_leaderboard(daily: dict) -> str:
     for place, attempts in enumerate(sorted(groups)[:3]):
         users = ", ".join(
             f"<@{user_id}> (**{winning_words[str(user_id)].upper()}**)"
-            if str(user_id) in winning_words
+            if reveal_words and str(user_id) in winning_words
             else f"<@{user_id}>"
             for user_id in sorted(groups[attempts])
         )

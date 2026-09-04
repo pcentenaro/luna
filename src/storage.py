@@ -289,6 +289,7 @@ class ConfigStore:
         event_slug: str,
         event_id: int,
         event_name: str,
+        pgrs_competition_id: str | None = None,
     ):
         data = self._load()
         data["active_event"] = {
@@ -296,6 +297,7 @@ class ConfigStore:
             "event_slug": event_slug,
             "event_id": event_id,
             "event_name": event_name,
+            "pgrs_competition_id": pgrs_competition_id,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save(data)

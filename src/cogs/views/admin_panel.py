@@ -1,3 +1,5 @@
+import re
+
 import discord
 
 import config
@@ -300,6 +302,8 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
             f"`{active_event['event_slug']}`\n"
             f"ID: `{active_event['event_id']}`"
         )
+        if active_event.get("pgrs_competition_id"):
+            event_value += f"\nPGRS: `{active_event['pgrs_competition_id']}`"
 
     admin_role_value = "Not configured"
     if admin_role_id:
@@ -450,6 +454,7 @@ def chunk_embed_lines(lines: list[str], limit: int = 900) -> list[str]:
 class SetEventModal(discord.ui.Modal):
     def __init__(self):
         super().__init__(title="Set active start.gg event")
+        active_event = config.config_store.get_active_event() or {}
         self.add_item(
             discord.ui.InputText(
                 label="Tournament slug",
@@ -464,10 +469,25 @@ class SetEventModal(discord.ui.Modal):
                 required=True,
             )
         )
+        self.add_item(
+            discord.ui.InputText(
+                label="PGRS competition URL or ID (optional)",
+                placeholder="Cj8oHYbKQo or https://.../competition/Cj8oHYbKQo/entries",
+                value=active_event.get("pgrs_competition_id"),
+                required=False,
+                max_length=200,
+            )
+        )
 
     async def callback(self, interaction: discord.Interaction):
         tournament_slug = self.children[0].value
         event_slug = self.children[1].value
+        pgrs_reference = (self.children[2].value or "").strip()
+        pgrs_competition_id = parse_pgrs_competition_id(pgrs_reference)
+
+        if pgrs_reference and pgrs_competition_id is None:
+            await interaction.response.send_message("Enter a valid PGRS competition URL or ID.", ephemeral=True)
+            return
 
         if config.startgg_client is None:
             await interaction.response.send_message("STARTGG_API_KEY is not configured yet.", ephemeral=True)
@@ -491,6 +511,7 @@ class SetEventModal(discord.ui.Modal):
             event_slug=full_event_slug,
             event_id=int(event["id"]),
             event_name=event["name"],
+            pgrs_competition_id=pgrs_competition_id,
         )
         try:
             sync_result = await sync_participant_role(interaction.guild)
@@ -499,9 +520,15 @@ class SetEventModal(discord.ui.Modal):
             sync_error = f" Could not sync participant roles: {error}"
         else:
             sync_error = ""
+        pgrs_message = (
+            f" PGRS competition `{pgrs_competition_id}` configured."
+            if pgrs_competition_id
+            else " No PGRS competition configured."
+        )
         await refresh_admin_panel(interaction)
         await interaction.followup.send(
-            f"Active event set to {event['name']} (`{full_event_slug}`).{format_role_sync_result(sync_result)}{sync_error}",
+            f"Active event set to {event['name']} (`{full_event_slug}`).{pgrs_message}"
+            f"{format_role_sync_result(sync_result)}{sync_error}",
             ephemeral=True,
         )
 
@@ -733,3 +760,12 @@ def build_event_slug(tournament_slug: str, event_slug: str) -> str:
         event_slug = event_slug.split("/", 1)[1]
 
     return f"tournament/{tournament_slug}/event/{event_slug}"
+
+
+def parse_pgrs_competition_id(reference: str) -> str | None:
+    value = reference.strip().strip("/")
+    if not value:
+        return None
+    if "/competition/" in value:
+        value = value.split("/competition/", 1)[1].split("/", 1)[0]
+    return value if re.fullmatch(r"[A-Za-z0-9_-]+", value) else None

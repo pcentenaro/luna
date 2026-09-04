@@ -870,7 +870,7 @@ class LinkStartggAccountModal(discord.ui.Modal):
                 await interaction.followup.send("No start.gg player was found with that ID or profile code.", ephemeral=True)
                 return
             existing_link = config.link_store.get_startgg_link_by_player_id(player["id"])
-            if existing_link is not None and existing_link["discord_user_id"] != interaction.user.id:
+            if existing_link is not None and int(existing_link["discord_user_id"]) != interaction.user.id:
                 await interaction.followup.send("This start.gg account is already linked to a Discord profile.", ephemeral=True)
                 return
         except StartGGError as error:

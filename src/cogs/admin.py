@@ -83,15 +83,24 @@ class Admin(commands.Cog):
             if link.get("startgg_player_id") is not None
         }
         attendees = build_attendee_link_statuses(entrants, links_by_player_id)
-        notifications = build_pgrs_link_statuses(attendees, links, pgrs_entries)["notifications"]
-        if not notifications:
+        statuses = build_pgrs_link_statuses(attendees, links, pgrs_entries)
+        notifications = statuses["notifications"]
+        unlinked = statuses["unlinked"]
+        if not notifications and not unlinked:
             await ctx.send("All linked participants are registered on both start.gg and PGRS.")
             return
 
-        for chunk in chunk_embed_lines(notifications, limit=1800):
+        for chunk in (chunk_embed_lines(notifications, limit=1800) if notifications else []):
             await ctx.send(
                 f"**Tournament registration reminder**\n{chunk}",
                 allowed_mentions=discord.AllowedMentions(users=True),
+            )
+
+        for chunk in (chunk_embed_lines(unlinked, limit=1600) if unlinked else []):
+            await ctx.send(
+                "**PGRS players without a linked Discord account**\n"
+                f"{chunk}\n\nIf one of these profiles is yours, use `/link`.",
+                allowed_mentions=discord.AllowedMentions.none(),
             )
 
 

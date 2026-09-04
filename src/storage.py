@@ -21,8 +21,8 @@ DEFAULT_SCORE_TARGETS = {
 
 
 class LinkStore:
-    def __init__(self):
-        self.connection = sqlite3.connect("data/luna.db")
+    def __init__(self, database_path: Path = DEFAULT_DATABASE_PATH):
+        self.connection = sqlite3.connect(database_path)
         self.connection.row_factory = lambda cursor, row: {key: value for key, value in zip([col[0] for col in cursor.description], row)}
         self.cursor = self.connection.cursor()
         self._create_tables()
@@ -31,6 +31,12 @@ class LinkStore:
         queries = [(Path(__file__).parent / "queries" / "create_links_table.sql").read_text()]
         for query in queries:
            self.cursor.execute(query)
+        columns = {column["name"] for column in self.cursor.execute("PRAGMA table_info(links)")}
+        if "pgrs_player_name" not in columns:
+            self.cursor.execute("ALTER TABLE links ADD COLUMN pgrs_player_name TEXT")
+        if "pgrs_player_id" not in columns:
+            self.cursor.execute("ALTER TABLE links ADD COLUMN pgrs_player_id TEXT")
+        self.connection.commit()
 
     def set_startgg_link(
         self,
@@ -61,6 +67,27 @@ class LinkStore:
                 gamer_tag,
                 prefix,
                 datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.connection.commit()
+
+    def set_pgrs_link(
+        self,
+        discord_user_id: int,
+        player_name: str,
+        player_id: str | None = None,
+    ):
+        self.cursor.execute(
+            """
+            UPDATE links
+            SET pgrs_player_name = ?, pgrs_player_id = ?, updated_at = ?
+            WHERE discord_user_id = ?
+            """,
+            (
+                player_name,
+                player_id,
+                datetime.now(timezone.utc).isoformat(),
+                discord_user_id,
             ),
         )
         self.connection.commit()

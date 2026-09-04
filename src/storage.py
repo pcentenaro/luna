@@ -74,7 +74,7 @@ class LinkStore:
     def set_pgrs_link(
         self,
         discord_user_id: int,
-        player_name: str,
+        player_name: str | None,
         player_id: str | None = None,
     ):
         self.cursor.execute(

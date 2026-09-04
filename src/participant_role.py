@@ -1,6 +1,7 @@
 import discord
 
 import config
+from pgrs import fetch_pgrs_entries, normalize_pgrs_name
 
 
 def get_registered_discord_user_ids(entrants: list[dict], links: list[dict]) -> set[int]:
@@ -15,6 +16,31 @@ def get_registered_discord_user_ids(entrants: list[dict], links: list[dict]) -> 
         for link in links
         if str(link.get("startgg_player_id")) in player_ids
     }
+
+
+def get_pgrs_registered_discord_user_ids(entries: list[dict], links: list[dict]) -> set[int]:
+    entries_by_id = {str(entry["player_id"]): entry for entry in entries}
+    entries_by_name = {}
+    for entry in entries:
+        entries_by_name.setdefault(normalize_pgrs_name(entry["player_name"]), []).append(entry)
+
+    registered_user_ids = set()
+    for link in links:
+        player_id = link.get("pgrs_player_id")
+        entry = entries_by_id.get(str(player_id)) if player_id else None
+        player_name = (link.get("pgrs_player_name") or "").strip()
+        if not player_id and player_name:
+            matches = entries_by_name.get(normalize_pgrs_name(player_name), [])
+            if len(matches) == 1:
+                entry = matches[0]
+                config.link_store.set_pgrs_link(
+                    int(link["discord_user_id"]),
+                    player_name,
+                    entry["player_id"],
+                )
+        if entry:
+            registered_user_ids.add(int(link["discord_user_id"]))
+    return registered_user_ids
 
 
 async def sync_participant_role(
@@ -33,6 +59,10 @@ async def sync_participant_role(
     entrants = await config.startgg_client.get_event_entrants(active_event["event_id"])
     links = config.link_store.get_all_startgg_links()
     registered_user_ids = get_registered_discord_user_ids(entrants, links)
+    pgrs_competition_id = active_event.get("pgrs_competition_id")
+    if pgrs_competition_id:
+        pgrs_entries = await fetch_pgrs_entries(pgrs_competition_id)
+        registered_user_ids &= get_pgrs_registered_discord_user_ids(pgrs_entries, links)
     if discord_user_id is not None:
         user_ids = {discord_user_id}
         registered_user_ids &= user_ids
@@ -65,7 +95,7 @@ async def sync_participant_role(
                 try:
                     await member.remove_roles(
                         role,
-                        reason=f"No longer registered for {active_event['event_name']} on start.gg",
+                        reason=f"Registration incomplete for {active_event['event_name']}",
                     )
                     result["removed"] += 1
                 except (discord.Forbidden, discord.HTTPException):
@@ -77,7 +107,8 @@ async def sync_participant_role(
             continue
 
         try:
-            await member.add_roles(role, reason=f"Registered for {active_event['event_name']} on start.gg")
+            source = "start.gg and PGRS" if pgrs_competition_id else "start.gg"
+            await member.add_roles(role, reason=f"Registered for {active_event['event_name']} on {source}")
             result["assigned"] += 1
         except (discord.Forbidden, discord.HTTPException):
             result["failed"] += 1

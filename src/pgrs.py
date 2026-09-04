@@ -6,6 +6,10 @@ import aiohttp
 PGRS_BASE_URL = "https://puyopuyo-global-ranking-series.j-cg.com"
 
 
+def normalize_pgrs_name(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
 class PGRSError(Exception):
     """Raised when PGRS cannot be read or returns an unexpected page."""
 

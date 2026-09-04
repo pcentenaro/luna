@@ -44,7 +44,7 @@ class Admin(commands.Cog):
 
         try:
             result = await sync_participant_role(ctx.guild)
-        except StartGGError as error:
+        except (StartGGError, PGRSError) as error:
             await ctx.send(f"Could not refresh participant roles: {error}")
             return
 

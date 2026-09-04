@@ -4,7 +4,7 @@ import discord
 
 import config
 from participant_role import remove_participant_roles, sync_participant_role
-from pgrs import PGRSError, fetch_pgrs_entries
+from pgrs import PGRSError, fetch_pgrs_entries, normalize_pgrs_name
 from startgg import StartGGError, format_user_display_name
 
 
@@ -238,9 +238,9 @@ class ParticipantRoleSelect(discord.ui.Select):
         await interaction.response.defer(ephemeral=True)
         try:
             sync_result = await sync_participant_role(interaction.guild)
-        except StartGGError as error:
+        except (StartGGError, PGRSError) as error:
             sync_result = None
-            sync_error = f" Could not sync start.gg attendees: {error}"
+            sync_error = f" Could not sync participant roles: {error}"
         else:
             sync_error = ""
 
@@ -532,10 +532,6 @@ def build_pgrs_link_statuses(
     return statuses
 
 
-def normalize_pgrs_name(value: str) -> str:
-    return " ".join(value.split()).casefold()
-
-
 def format_pgrs_status(startgg_name: str, pgrs_name: str, player_id: str) -> str:
     pgrs_name = discord.utils.escape_markdown(pgrs_name)
     return f"**{startgg_name}** -> **{pgrs_name}** (`#{player_id}`)"
@@ -634,7 +630,7 @@ class SetEventModal(discord.ui.Modal):
         )
         try:
             sync_result = await sync_participant_role(interaction.guild)
-        except StartGGError as error:
+        except (StartGGError, PGRSError) as error:
             sync_result = None
             sync_error = f" Could not sync participant roles: {error}"
         else:

@@ -5,6 +5,7 @@ from datetime import datetime
 from datetime import timezone
 from discord.ext import commands
 from participant_role import sync_participant_role
+from pgrs import PGRSError
 from startgg import StartGGClient, StartGGError
 from storage import LinkStore, EventDataStore
 
@@ -886,7 +887,7 @@ class LinkStartggAccountModal(discord.ui.Modal):
         config.link_store.set_pgrs_link(interaction.user.id, pgrs_player_name)
         try:
             sync_result = await sync_participant_role(interaction.guild, interaction.user.id)
-        except StartGGError:
+        except (StartGGError, PGRSError):
             sync_result = None
         role_message = ""
         if sync_result and sync_result["assigned"]:

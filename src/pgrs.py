@@ -21,7 +21,7 @@ class _EntriesParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         classes = (dict(attrs).get("class") or "").split()
-        if "participants-table__body" in classes:
+        if "cgCompetition_entries" in classes or "participants-table__body" in classes:
             self.found_table = True
         if "player-name" in classes:
             self._field = "name"

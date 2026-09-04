@@ -4,6 +4,7 @@ import discord
 
 import config
 from participant_role import remove_participant_roles, sync_participant_role
+from pgrs import PGRSError, fetch_pgrs_entries
 from startgg import StartGGError, format_user_display_name
 
 
@@ -147,7 +148,21 @@ class AdminPanelView(discord.ui.View):
             )
             return
 
-        embed = build_linked_accounts_embed(active_event, entrants, interaction.guild)
+        pgrs_entries = None
+        pgrs_error = None
+        if active_event.get("pgrs_competition_id"):
+            try:
+                pgrs_entries = await fetch_pgrs_entries(active_event["pgrs_competition_id"])
+            except PGRSError as error:
+                pgrs_error = str(error)
+
+        embed = build_linked_accounts_embed(
+            active_event,
+            entrants,
+            interaction.guild,
+            pgrs_entries,
+            pgrs_error,
+        )
         await interaction.followup.send(
             embed=embed,
             ephemeral=False,
@@ -343,10 +358,13 @@ def build_linked_accounts_embed(
     active_event: dict,
     entrants: list[dict],
     guild: discord.Guild | None,
+    pgrs_entries: list[dict] | None = None,
+    pgrs_error: str | None = None,
 ) -> discord.Embed:
+    links = config.link_store.get_all_startgg_links()
     links_by_player_id = {
         str(link["startgg_player_id"]): link
-        for link in config.link_store.get_all_startgg_links()
+        for link in links
         if link.get("startgg_player_id") is not None
     }
     attendees = build_attendee_link_statuses(entrants, links_by_player_id)
@@ -379,6 +397,24 @@ def build_linked_accounts_embed(
             for attendee in unlinked_attendees
         ],
     )
+    if pgrs_error:
+        embed.add_field(name="PGRS", value=pgrs_error, inline=False)
+    elif pgrs_entries is not None:
+        pgrs_statuses = build_pgrs_link_statuses(attendees, links, pgrs_entries)
+        embed.description += (
+            f"\n\n**PGRS registered:** {len(pgrs_statuses['registered'])}\n"
+            f"**Missing from PGRS:** {len(pgrs_statuses['missing'])}\n"
+            f"**Missing from StartGG:** {len(pgrs_statuses['missing_startgg'])}\n"
+            f"**No PGRS name:** {len(pgrs_statuses['unnamed'])}\n"
+            f"**PGRS name not resolved:** {len(pgrs_statuses['unresolved'])}\n"
+            f"**PGRS accounts not linked:** {len(pgrs_statuses['unlinked'])}"
+        )
+        add_link_status_fields(embed, "PGRS registered", pgrs_statuses["registered"])
+        add_link_status_fields(embed, "Missing from PGRS", pgrs_statuses["missing"])
+        add_link_status_fields(embed, "Missing from StartGG", pgrs_statuses["missing_startgg"])
+        add_link_status_fields(embed, "No PGRS name", pgrs_statuses["unnamed"])
+        add_link_status_fields(embed, "PGRS name not resolved", pgrs_statuses["unresolved"])
+        add_link_status_fields(embed, "PGRS accounts not linked", pgrs_statuses["unlinked"])
     embed.set_footer(text="Account links are stored by start.gg player ID.")
     return embed
 
@@ -420,6 +456,75 @@ def format_linked_attendee(attendee: dict, guild: discord.Guild | None) -> str:
     discord_profile = member.mention if member else f"<@{discord_user_id}>"
     startgg_name = discord.utils.escape_markdown(attendee["name"])
     return f"Linked: **{startgg_name}** -> {discord_profile}"
+
+
+def build_pgrs_link_statuses(
+    attendees: list[dict],
+    links: list[dict],
+    pgrs_entries: list[dict],
+) -> dict[str, list[str]]:
+    attendees_by_player_id = {
+        str(attendee["player_id"]): attendee
+        for attendee in attendees
+        if attendee.get("player_id") is not None
+    }
+    entries_by_id = {str(entry["player_id"]): entry for entry in pgrs_entries}
+    entries_by_name = {}
+    for entry in pgrs_entries:
+        entries_by_name.setdefault(normalize_pgrs_name(entry["player_name"]), []).append(entry)
+
+    statuses = {
+        "registered": [],
+        "missing": [],
+        "missing_startgg": [],
+        "unnamed": [],
+        "unresolved": [],
+        "unlinked": [],
+    }
+    linked_pgrs_ids = set()
+    for link in links:
+        attendee = attendees_by_player_id.get(str(link.get("startgg_player_id")))
+        startgg_name = attendee["name"] if attendee else link.get("startgg_gamer_tag") or "Unknown"
+        startgg_name = discord.utils.escape_markdown(startgg_name)
+        pgrs_name = (link.get("pgrs_player_name") or "").strip()
+        pgrs_player_id = link.get("pgrs_player_id")
+        entry = entries_by_id.get(str(pgrs_player_id)) if pgrs_player_id else None
+
+        if not pgrs_player_id and pgrs_name:
+            matches = entries_by_name.get(normalize_pgrs_name(pgrs_name), [])
+            if len(matches) == 1:
+                entry = matches[0]
+                pgrs_player_id = entry["player_id"]
+                config.link_store.set_pgrs_link(int(link["discord_user_id"]), pgrs_name, pgrs_player_id)
+            elif attendee:
+                reason = "ambiguous" if matches else "not found"
+                escaped_name = discord.utils.escape_markdown(pgrs_name)
+                statuses["unresolved"].append(f"**{startgg_name}** -> **{escaped_name}** ({reason})")
+
+        if entry:
+            linked_pgrs_ids.add(str(entry["player_id"]))
+            target = "registered" if attendee else "missing_startgg"
+            statuses[target].append(format_pgrs_status(startgg_name, entry["player_name"], entry["player_id"]))
+        elif attendee and pgrs_player_id:
+            statuses["missing"].append(format_pgrs_status(startgg_name, pgrs_name or "Unknown", str(pgrs_player_id)))
+        elif attendee and not pgrs_name:
+            statuses["unnamed"].append(f"**{startgg_name}**")
+
+    for entry in pgrs_entries:
+        if str(entry["player_id"]) not in linked_pgrs_ids:
+            pgrs_name = discord.utils.escape_markdown(entry["player_name"])
+            statuses["unlinked"].append(f"**{pgrs_name}** (`#{entry['player_id']}`)")
+
+    return statuses
+
+
+def normalize_pgrs_name(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def format_pgrs_status(startgg_name: str, pgrs_name: str, player_id: str) -> str:
+    pgrs_name = discord.utils.escape_markdown(pgrs_name)
+    return f"**{startgg_name}** -> **{pgrs_name}** (`#{player_id}`)"
 
 
 def add_link_status_fields(embed: discord.Embed, title: str, lines: list[str]):

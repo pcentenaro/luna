@@ -1,0 +1,23 @@
+import discord
+import os
+from discord.ext import commands
+from dotenv import load_dotenv
+from startgg import StartGGClient
+from storage import CluesStore, ConfigStore, LinkStore
+
+load_dotenv()
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(
+    command_prefix="!",
+    help_command=None,
+    intents=intents
+)
+
+startgg_api_key = os.getenv("STARTGG_API_KEY")
+startgg_client = StartGGClient(startgg_api_key) if startgg_api_key else None
+rae_api_key = os.getenv("RAE_API_KEY")
+link_store = LinkStore()
+config_store = ConfigStore()
+clues_store = CluesStore()

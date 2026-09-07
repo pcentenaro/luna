@@ -1,16 +1,23 @@
-import discord
+import cogs
 import os # default module
-from dotenv import load_dotenv
+import config
+import discord
 
-load_dotenv() # load all the variables from the env file
-bot = discord.Bot()
 
-@bot.event
+@config.bot.event
 async def on_ready():
-    print(f"{bot.user} is ready and online!")
+    print(f"{config.bot.user} is ready and online!")
 
-@bot.slash_command(name="hello", description="Say hello to the bot")
+
+@config.bot.slash_command(name="hello", description="Say hello to the bot")
 async def hello(ctx: discord.ApplicationContext):
     await ctx.respond("Hey!")
 
-bot.run(os.getenv('BOT_TOKEN')) # run the bot with the token
+
+if __name__ == "__main__":
+    config.bot.load_extension("cogs.admin")
+    config.bot.load_extension("cogs.seeding")
+    config.bot.load_extension("cogs.staff_help")
+    config.bot.load_extension("cogs.startgg")
+    config.bot.load_extension("cogs.guess_clues")
+    config.bot.run(os.getenv('BOT_TOKEN')) # run the bot with the token

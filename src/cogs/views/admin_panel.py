@@ -1,6 +1,10 @@
+import re
+
 import discord
 
 import config
+from participant_role import remove_participant_roles, sync_participant_role
+from pgrs import PGRSError, fetch_pgrs_entries, normalize_pgrs_name
 from startgg import StartGGError, format_user_display_name
 
 
@@ -25,10 +29,30 @@ class AdminPanelView(discord.ui.View):
             await interaction.response.send_message("Only Luna admins can clear the active event.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True)
+        try:
+            removal_result = await remove_participant_roles(interaction.guild)
+        except StartGGError as error:
+            await interaction.followup.send(
+                f"Could not remove participant roles, so the event was not cleared: {error}",
+                ephemeral=True,
+            )
+            return
+
+        if removal_result and removal_result["failed"]:
+            await interaction.followup.send(
+                f"Could not remove {removal_result['failed']} participant role(s), so the event was not cleared.",
+                ephemeral=True,
+            )
+            return
+
         deleted = config.config_store.clear_active_event()
-        await refresh_admin_panel_response(interaction)
+        await refresh_admin_panel(interaction)
         if deleted:
-            await interaction.followup.send("Active start.gg event cleared.", ephemeral=True)
+            await interaction.followup.send(
+                f"Active start.gg event cleared.{format_role_removal_result(removal_result)}",
+                ephemeral=True,
+            )
             return
 
         await interaction.followup.send("No active start.gg event was configured.", ephemeral=True)
@@ -76,6 +100,18 @@ class AdminPanelView(discord.ui.View):
 
         await interaction.followup.send("No Luna admin role was configured.", ephemeral=True)
 
+    @discord.ui.button(label="Set participant role", style=discord.ButtonStyle.primary, row=1)
+    async def set_participant_role(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the participant role.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            "Choose an existing server role for registered tournament participants.",
+            view=ParticipantRoleView(interaction.message),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Set score targets", style=discord.ButtonStyle.primary, row=2)
     async def set_score_targets(self, button: discord.ui.Button, interaction: discord.Interaction):
         if not is_luna_admin(interaction):
@@ -112,7 +148,21 @@ class AdminPanelView(discord.ui.View):
             )
             return
 
-        embed = build_linked_accounts_embed(active_event, entrants, interaction.guild)
+        pgrs_entries = None
+        pgrs_error = None
+        if active_event.get("pgrs_competition_id"):
+            try:
+                pgrs_entries = await fetch_pgrs_entries(active_event["pgrs_competition_id"])
+            except PGRSError as error:
+                pgrs_error = str(error)
+
+        embed = build_linked_accounts_embed(
+            active_event,
+            entrants,
+            interaction.guild,
+            pgrs_entries,
+            pgrs_error,
+        )
         await interaction.followup.send(
             embed=embed,
             ephemeral=False,
@@ -153,6 +203,60 @@ class ChannelSettingsView(discord.ui.View):
         await refresh_channel_settings_response(interaction)
         message = "Guess the Clues ranking channel cleared." if deleted else "No ranking channel was configured."
         await interaction.followup.send(message, ephemeral=True)
+
+
+class ParticipantRoleView(discord.ui.View):
+    def __init__(self, panel_message: discord.Message | None):
+        super().__init__(timeout=300)
+        self.add_item(ParticipantRoleSelect(panel_message))
+
+
+class ParticipantRoleSelect(discord.ui.Select):
+    def __init__(self, panel_message: discord.Message | None):
+        self.panel_message = panel_message
+        super().__init__(
+            select_type=discord.ComponentType.role_select,
+            custom_id="admin:participant_role",
+            placeholder="Choose the tournament participant role",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the participant role.", ephemeral=True)
+            return
+
+        role = self.values[0]
+        bot_member = interaction.guild.me if interaction.guild else None
+        if role.is_default() or role.managed or bot_member is None or role >= bot_member.top_role:
+            await interaction.response.send_message(
+                "Luna cannot assign that role. Move Luna above it and choose a regular server role.",
+                ephemeral=True,
+            )
+            return
+
+        config.config_store.set_participant_role_id(role.id)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            sync_result = await sync_participant_role(interaction.guild)
+        except (StartGGError, PGRSError) as error:
+            sync_result = None
+            sync_error = f" Could not sync participant roles: {error}"
+        else:
+            sync_error = ""
+
+        if self.panel_message:
+            try:
+                await self.panel_message.edit(
+                    embed=build_admin_panel_embed(interaction.guild),
+                    view=AdminPanelView(),
+                )
+            except (discord.Forbidden, discord.NotFound):
+                pass
+
+        await interaction.followup.send(
+            f"Tournament participant role set to {role.mention}.{format_role_sync_result(sync_result)}{sync_error}",
+            ephemeral=True,
+        )
 
 
 class LeaderboardChannelSelect(discord.ui.Select):
@@ -203,6 +307,7 @@ def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
 def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     active_event = config.config_store.get_active_event()
     admin_role_id = config.config_store.get_admin_role_id()
+    participant_role_id = config.config_store.get_participant_role_id()
     score_targets = config.config_store.get_score_targets()
 
     event_value = "Not configured"
@@ -212,11 +317,18 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
             f"`{active_event['event_slug']}`\n"
             f"ID: `{active_event['event_id']}`"
         )
+        if active_event.get("pgrs_competition_id"):
+            event_value += f"\nPGRS: `{active_event['pgrs_competition_id']}`"
 
     admin_role_value = "Not configured"
     if admin_role_id:
         role = guild.get_role(admin_role_id) if guild else None
         admin_role_value = role.mention if role else f"Missing role ID `{admin_role_id}`"
+
+    participant_role_value = "Not configured"
+    if participant_role_id:
+        role = guild.get_role(participant_role_id) if guild else None
+        participant_role_value = role.mention if role else f"Missing role ID `{participant_role_id}`"
 
     startgg_value = "Configured" if config.startgg_client else "STARTGG_API_KEY missing"
 
@@ -228,6 +340,7 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     embed.set_thumbnail(url=LUNA_AVATAR_URL)
     embed.add_field(name="Active event", value=event_value, inline=False)
     embed.add_field(name="Admin role", value=admin_role_value, inline=True)
+    embed.add_field(name="Participant role", value=participant_role_value, inline=True)
     embed.add_field(name="Start.gg", value=startgg_value, inline=True)
     embed.add_field(
         name="Score targets",
@@ -245,10 +358,13 @@ def build_linked_accounts_embed(
     active_event: dict,
     entrants: list[dict],
     guild: discord.Guild | None,
+    pgrs_entries: list[dict] | None = None,
+    pgrs_error: str | None = None,
 ) -> discord.Embed:
+    links = config.link_store.get_all_startgg_links()
     links_by_player_id = {
         str(link["startgg_player_id"]): link
-        for link in config.link_store.get_all_startgg_links()
+        for link in links
         if link.get("startgg_player_id") is not None
     }
     attendees = build_attendee_link_statuses(entrants, links_by_player_id)
@@ -281,6 +397,24 @@ def build_linked_accounts_embed(
             for attendee in unlinked_attendees
         ],
     )
+    if pgrs_error:
+        embed.add_field(name="PGRS", value=pgrs_error, inline=False)
+    elif pgrs_entries is not None:
+        pgrs_statuses = build_pgrs_link_statuses(attendees, links, pgrs_entries)
+        embed.description += (
+            f"\n\n**PGRS registered:** {len(pgrs_statuses['registered'])}\n"
+            f"**Missing from PGRS:** {len(pgrs_statuses['missing'])}\n"
+            f"**Missing from StartGG:** {len(pgrs_statuses['missing_startgg'])}\n"
+            f"**No PGRS name:** {len(pgrs_statuses['unnamed'])}\n"
+            f"**PGRS name not resolved:** {len(pgrs_statuses['unresolved'])}\n"
+            f"**PGRS accounts not linked:** {len(pgrs_statuses['unlinked'])}"
+        )
+        add_link_status_fields(embed, "PGRS registered", pgrs_statuses["registered"])
+        add_link_status_fields(embed, "Missing from PGRS", pgrs_statuses["missing"])
+        add_link_status_fields(embed, "Missing from StartGG", pgrs_statuses["missing_startgg"])
+        add_link_status_fields(embed, "No PGRS name", pgrs_statuses["unnamed"])
+        add_link_status_fields(embed, "PGRS name not resolved", pgrs_statuses["unresolved"])
+        add_link_status_fields(embed, "PGRS accounts not linked", pgrs_statuses["unlinked"])
     embed.set_footer(text="Account links are stored by start.gg player ID.")
     return embed
 
@@ -324,6 +458,85 @@ def format_linked_attendee(attendee: dict, guild: discord.Guild | None) -> str:
     return f"Linked: **{startgg_name}** -> {discord_profile}"
 
 
+def build_pgrs_link_statuses(
+    attendees: list[dict],
+    links: list[dict],
+    pgrs_entries: list[dict],
+) -> dict[str, list[str]]:
+    attendees_by_player_id = {
+        str(attendee["player_id"]): attendee
+        for attendee in attendees
+        if attendee.get("player_id") is not None
+    }
+    entries_by_id = {str(entry["player_id"]): entry for entry in pgrs_entries}
+    entries_by_name = {}
+    for entry in pgrs_entries:
+        entries_by_name.setdefault(normalize_pgrs_name(entry["player_name"]), []).append(entry)
+
+    statuses = {
+        "registered": [],
+        "missing": [],
+        "missing_startgg": [],
+        "unnamed": [],
+        "unresolved": [],
+        "unlinked": [],
+        "notifications": [],
+    }
+    linked_pgrs_ids = set()
+    for link in links:
+        attendee = attendees_by_player_id.get(str(link.get("startgg_player_id")))
+        startgg_name = attendee["name"] if attendee else link.get("startgg_gamer_tag") or "Unknown"
+        startgg_name = discord.utils.escape_markdown(startgg_name)
+        pgrs_name = (link.get("pgrs_player_name") or "").strip()
+        pgrs_player_id = link.get("pgrs_player_id")
+        entry = entries_by_id.get(str(pgrs_player_id)) if pgrs_player_id else None
+
+        if not pgrs_player_id and pgrs_name:
+            matches = entries_by_name.get(normalize_pgrs_name(pgrs_name), [])
+            if len(matches) == 1:
+                entry = matches[0]
+                pgrs_player_id = entry["player_id"]
+                config.link_store.set_pgrs_link(int(link["discord_user_id"]), pgrs_name, pgrs_player_id)
+            elif attendee:
+                reason = "ambiguous" if matches else "not found"
+                escaped_name = discord.utils.escape_markdown(pgrs_name)
+                statuses["unresolved"].append(f"**{startgg_name}** -> **{escaped_name}** ({reason})")
+                statuses["notifications"].append(
+                    f"<@{link['discord_user_id']}> — check your PGRS player name in `/link` and your PGRS registration."
+                )
+
+        if entry:
+            linked_pgrs_ids.add(str(entry["player_id"]))
+            target = "registered" if attendee else "missing_startgg"
+            statuses[target].append(format_pgrs_status(startgg_name, entry["player_name"], entry["player_id"]))
+            if not attendee:
+                statuses["notifications"].append(
+                    f"<@{link['discord_user_id']}> — register for the tournament on start.gg."
+                )
+        elif attendee and pgrs_player_id:
+            statuses["missing"].append(format_pgrs_status(startgg_name, pgrs_name or "Unknown", str(pgrs_player_id)))
+            statuses["notifications"].append(
+                f"<@{link['discord_user_id']}> — register for the tournament on PGRS."
+            )
+        elif attendee and not pgrs_name:
+            statuses["unnamed"].append(f"**{startgg_name}**")
+            statuses["notifications"].append(
+                f"<@{link['discord_user_id']}> — add your PGRS player name with `/link`."
+            )
+
+    for entry in pgrs_entries:
+        if str(entry["player_id"]) not in linked_pgrs_ids:
+            pgrs_name = discord.utils.escape_markdown(entry["player_name"])
+            statuses["unlinked"].append(f"**{pgrs_name}** (`#{entry['player_id']}`)")
+
+    return statuses
+
+
+def format_pgrs_status(startgg_name: str, pgrs_name: str, player_id: str) -> str:
+    pgrs_name = discord.utils.escape_markdown(pgrs_name)
+    return f"**{startgg_name}** -> **{pgrs_name}** (`#{player_id}`)"
+
+
 def add_link_status_fields(embed: discord.Embed, title: str, lines: list[str]):
     chunks = chunk_embed_lines(lines)
     for index, chunk in enumerate(chunks):
@@ -356,24 +569,40 @@ def chunk_embed_lines(lines: list[str], limit: int = 900) -> list[str]:
 class SetEventModal(discord.ui.Modal):
     def __init__(self):
         super().__init__(title="Set active start.gg event")
+        active_event = config.config_store.get_active_event() or {}
         self.add_item(
             discord.ui.InputText(
                 label="Tournament slug",
-                placeholder="torneo-pruebas-bot-luna",
+                value="copa-luna-xx",
                 required=True,
             )
         )
         self.add_item(
             discord.ui.InputText(
                 label="Event slug",
-                placeholder="puyo-singles",
+                value="puyo-singles",
                 required=True,
+            )
+        )
+        self.add_item(
+            discord.ui.InputText(
+                label="PGRS competition URL or ID (optional)",
+                placeholder="Cj8oHYbKQo or https://.../competition/Cj8oHYbKQo/entries",
+                value=active_event.get("pgrs_competition_id"),
+                required=False,
+                max_length=200,
             )
         )
 
     async def callback(self, interaction: discord.Interaction):
         tournament_slug = self.children[0].value
         event_slug = self.children[1].value
+        pgrs_reference = (self.children[2].value or "").strip()
+        pgrs_competition_id = parse_pgrs_competition_id(pgrs_reference)
+
+        if pgrs_reference and pgrs_competition_id is None:
+            await interaction.response.send_message("Enter a valid PGRS competition URL or ID.", ephemeral=True)
+            return
 
         if config.startgg_client is None:
             await interaction.response.send_message("STARTGG_API_KEY is not configured yet.", ephemeral=True)
@@ -397,10 +626,24 @@ class SetEventModal(discord.ui.Modal):
             event_slug=full_event_slug,
             event_id=int(event["id"]),
             event_name=event["name"],
+            pgrs_competition_id=pgrs_competition_id,
+        )
+        try:
+            sync_result = await sync_participant_role(interaction.guild)
+        except (StartGGError, PGRSError) as error:
+            sync_result = None
+            sync_error = f" Could not sync participant roles: {error}"
+        else:
+            sync_error = ""
+        pgrs_message = (
+            f" PGRS competition `{pgrs_competition_id}` configured."
+            if pgrs_competition_id
+            else " No PGRS competition configured."
         )
         await refresh_admin_panel(interaction)
         await interaction.followup.send(
-            f"Active event set to {event['name']} (`{full_event_slug}`).",
+            f"Active event set to {event['name']} (`{full_event_slug}`).{pgrs_message}"
+            f"{format_role_sync_result(sync_result)}{sync_error}",
             ephemeral=True,
         )
 
@@ -598,6 +841,27 @@ def normalize_role_name(value: str) -> str:
     return value.strip()
 
 
+def format_role_sync_result(result: dict | None) -> str:
+    if result is None:
+        return ""
+    return (
+        f" Assigned to {result['assigned']} linked participant(s); "
+        f"{result['already']} already had it, {result['removed']} removed, "
+        f"{result['missing']} are not in this server, "
+        f"and {result['failed']} failed."
+    )
+
+
+def format_role_removal_result(result: dict | None) -> str:
+    if result is None:
+        return ""
+    return (
+        f" Removed from {result['removed']} linked participant(s); "
+        f"{result['absent']} did not have it, {result['missing']} are not in this server, "
+        f"and {result['failed']} failed."
+    )
+
+
 def build_event_slug(tournament_slug: str, event_slug: str) -> str:
     event_slug = event_slug.strip().strip("/")
     if event_slug.startswith("tournament/"):
@@ -611,3 +875,12 @@ def build_event_slug(tournament_slug: str, event_slug: str) -> str:
         event_slug = event_slug.split("/", 1)[1]
 
     return f"tournament/{tournament_slug}/event/{event_slug}"
+
+
+def parse_pgrs_competition_id(reference: str) -> str | None:
+    value = reference.strip().strip("/")
+    if not value:
+        return None
+    if "/competition/" in value:
+        value = value.split("/competition/", 1)[1].split("/", 1)[0]
+    return value if re.fullmatch(r"[A-Za-z0-9_-]+", value) else None

@@ -4,6 +4,8 @@ import discord
 from datetime import datetime
 from datetime import timezone
 from discord.ext import commands
+from participant_role import sync_participant_role
+from pgrs import PGRSError
 from startgg import StartGGClient, StartGGError
 from storage import LinkStore, EventDataStore
 
@@ -47,7 +49,12 @@ class Startgg(commands.Cog):
             await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
             return
 
-        await ctx.send_modal(LinkStartggAccountModal(ctx.author.id))
+        await ctx.send_modal(
+            LinkStartggAccountModal(
+                ctx.author.id,
+                config.link_store.get_startgg_link(ctx.author.id),
+            )
+        )
 
 
     @startgg.command(
@@ -824,14 +831,24 @@ class DQReportModal(discord.ui.Modal):
 
 
 class LinkStartggAccountModal(discord.ui.Modal):
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int, existing_link: dict | None = None):
         super().__init__(title="Link start.gg account")
         self.user_id = user_id
         self.add_item(
             discord.ui.InputText(
                 label="Player ID or profile code",
                 placeholder="74b6cc6d or https://www.start.gg/user/74b6cc6d",
+                value=str(existing_link["startgg_player_id"]) if existing_link else None,
                 required=True,
+            )
+        )
+        self.add_item(
+            discord.ui.InputText(
+                label="PGRS player name (optional)",
+                placeholder="Your name in the PGRS page",
+                value=existing_link["pgrs_player_name"] if existing_link else None,
+                required=False,
+                max_length=100,
             )
         )
 
@@ -845,19 +862,20 @@ class LinkStartggAccountModal(discord.ui.Modal):
             return
 
         player_reference = self.children[0].value
+        pgrs_player_name = (self.children[1].value or "").strip() or None
         await interaction.response.defer(ephemeral=True)
 
         try:
             player = await find_startgg_player(player_reference)
-            if LinkStore().get_startgg_link_by_player_id(player["id"]) is not None:
+            if player is None:
+                await interaction.followup.send("No start.gg player was found with that ID or profile code.", ephemeral=True)
+                return
+            existing_link = config.link_store.get_startgg_link_by_player_id(player["id"])
+            if existing_link is not None and int(existing_link["discord_user_id"]) != interaction.user.id:
                 await interaction.followup.send("This start.gg account is already linked to a Discord profile.", ephemeral=True)
                 return
         except StartGGError as error:
             await interaction.followup.send(f"Could not verify that start.gg profile: {error}", ephemeral=True)
-            return
-
-        if player is None:
-            await interaction.followup.send("No start.gg player was found with that ID or profile code.", ephemeral=True)
             return
 
         config.link_store.set_startgg_link(
@@ -866,8 +884,17 @@ class LinkStartggAccountModal(discord.ui.Modal):
             gamer_tag=player.get("gamerTag"),
             prefix=player.get("prefix"),
         )
+        config.link_store.set_pgrs_link(interaction.user.id, pgrs_player_name)
+        try:
+            sync_result = await sync_participant_role(interaction.guild, interaction.user.id)
+        except (StartGGError, PGRSError):
+            sync_result = None
+        role_message = ""
+        if sync_result and sync_result["assigned"]:
+            role_message = " Your tournament participant role was also assigned."
+        pgrs_message = " PGRS player name saved." if pgrs_player_name else " No PGRS player name was saved."
         await interaction.followup.send(
-            f"Linked your Discord account to {format_startgg_player(player)}.",
+            f"Linked your Discord account to {format_startgg_player(player)}.{pgrs_message}{role_message}",
             ephemeral=True,
         )
 

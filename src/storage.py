@@ -21,8 +21,8 @@ DEFAULT_SCORE_TARGETS = {
 
 
 class LinkStore:
-    def __init__(self):
-        self.connection = sqlite3.connect("data/luna.db")
+    def __init__(self, database_path: Path = DEFAULT_DATABASE_PATH):
+        self.connection = sqlite3.connect(database_path)
         self.connection.row_factory = lambda cursor, row: {key: value for key, value in zip([col[0] for col in cursor.description], row)}
         self.cursor = self.connection.cursor()
         self._create_tables()
@@ -31,6 +31,12 @@ class LinkStore:
         queries = [(Path(__file__).parent / "queries" / "create_links_table.sql").read_text()]
         for query in queries:
            self.cursor.execute(query)
+        columns = {column["name"] for column in self.cursor.execute("PRAGMA table_info(links)")}
+        if "pgrs_player_name" not in columns:
+            self.cursor.execute("ALTER TABLE links ADD COLUMN pgrs_player_name TEXT")
+        if "pgrs_player_id" not in columns:
+            self.cursor.execute("ALTER TABLE links ADD COLUMN pgrs_player_id TEXT")
+        self.connection.commit()
 
     def set_startgg_link(
         self,
@@ -39,17 +45,50 @@ class LinkStore:
         gamer_tag: str | None,
         prefix: str | None,
     ):
-        self.cursor.execute(f"""
-            INSERT INTO links
-                VALUES({discord_user_id}, {startgg_player_id}, \"{gamer_tag}\", \"{prefix}\", \"{datetime.now(timezone.utc).isoformat()}\")
+        self.cursor.execute(
+            """
+            INSERT INTO links (
+                discord_user_id,
+                startgg_player_id,
+                startgg_gamer_tag,
+                startgg_prefix,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(startgg_player_id) DO NOTHING
                 ON CONFLICT(discord_user_id) DO UPDATE SET
                     startgg_player_id = excluded.startgg_player_id,
                     startgg_gamer_tag = excluded.startgg_gamer_tag,
                     startgg_prefix = excluded.startgg_prefix,
                     updated_at = excluded.updated_at
-                WHERE startgg_player_id NOT IN ({startgg_player_id})
+            """,
+            (
+                discord_user_id,
+                startgg_player_id,
+                gamer_tag,
+                prefix,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.connection.commit()
+
+    def set_pgrs_link(
+        self,
+        discord_user_id: int,
+        player_name: str | None,
+        player_id: str | None = None,
+    ):
+        self.cursor.execute(
             """
+            UPDATE links
+            SET pgrs_player_name = ?, pgrs_player_id = ?, updated_at = ?
+            WHERE discord_user_id = ?
+            """,
+            (
+                player_name,
+                player_id,
+                datetime.now(timezone.utc).isoformat(),
+                discord_user_id,
+            ),
         )
         self.connection.commit()
 
@@ -232,6 +271,15 @@ class ConfigStore:
         self._save(data)
         return True
 
+    def get_participant_role_id(self) -> int | None:
+        role_id = self._load().get("participant_role_id")
+        return int(role_id) if role_id else None
+
+    def set_participant_role_id(self, role_id: int):
+        data = self._load()
+        data["participant_role_id"] = str(role_id)
+        self._save(data)
+
     def get_active_event(self) -> dict | None:
         return self._load().get("active_event")
 
@@ -241,6 +289,7 @@ class ConfigStore:
         event_slug: str,
         event_id: int,
         event_name: str,
+        pgrs_competition_id: str | None = None,
     ):
         data = self._load()
         data["active_event"] = {
@@ -248,6 +297,7 @@ class ConfigStore:
             "event_slug": event_slug,
             "event_id": event_id,
             "event_name": event_name,
+            "pgrs_competition_id": pgrs_competition_id,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save(data)

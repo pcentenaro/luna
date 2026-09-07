@@ -477,7 +477,7 @@ class EventDataStore:
                 self.cursor.execute(
                     f"""
                     INSERT INTO links
-                        VALUES(?, ?, ?, ?, ?)
+                        VALUES(?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(startgg_player_id) DO UPDATE SET
                             startgg_gamer_tag = excluded.startgg_gamer_tag,
                             startgg_prefix = excluded.startgg_prefix,
@@ -488,6 +488,8 @@ class EventDataStore:
                         None,
                         player["gamerTag"],
                         player["prefix"],
+                        None,
+                        None,
                         datetime.now(timezone.utc).isoformat()
                     )
                 )

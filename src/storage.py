@@ -355,7 +355,8 @@ class EventDataStore:
             url="https://api.start.gg/gql/alpha",
             headers={"Authorization": f"Bearer {os.getenv("STARTGG_API_KEY")}"})
         self.gql_client = Client(transport=self.transport,
-                        fetch_schema_from_transport=False)
+                        fetch_schema_from_transport=False,
+                        execute_timeout=50)
 
     def __enter__(self):
         return self
@@ -627,7 +628,7 @@ class EventDataStore:
                                 slots[1]["standing"]["placement"]
                             )
                         )
-            sleep(cooldown_secs)
+                sleep(cooldown_secs)
         self.connection.commit()
 
     def store_tournament_standings(self, cooldown_secs = 5):

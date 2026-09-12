@@ -399,7 +399,7 @@ class GuessClues(commands.Cog):
             config.clues_store.record_clues_results(
                 players, game["mode"], game["attempts"]
             )
-        lines = [f"**{word.upper()}** — {result}", "", format_board(game)]
+        lines = [f"**{word.upper()}** — {result}", "", format_board(game, guess_criteria)]
 
         if private:
             if won:
@@ -686,8 +686,9 @@ def choose_round_criteria(target_criteria: set[str]) -> list[str]:
     return selected
 
 
-def format_board(game: dict) -> str:
+def format_board(game: dict, matches: set[str] | None = None) -> str:
     lines = []
+    matches = matches or set()
     for key in game["criteria"]:
         if key not in game["resolved"]:
             marker = "❓"
@@ -695,7 +696,8 @@ def format_board(game: dict) -> str:
             marker = "✅"
         else:
             marker = "❌"
-        lines.append(f"{marker} {CRITERIA[key]}")
+        criterion = f"**{CRITERIA[key]}**" if key in matches else CRITERIA[key]
+        lines.append(f"{marker} {criterion}")
     return "\n".join(lines)
 
 

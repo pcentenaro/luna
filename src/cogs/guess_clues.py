@@ -170,6 +170,7 @@ class GuessClues(commands.Cog):
                 "criteria": choose_round_criteria(target_criteria),
                 "players": [],
                 "attempts": {},
+                "resolved": {},
                 "results": {},
                 "winning_words": {},
                 "streaks": daily.get("streaks", {}) if daily else {},
@@ -213,6 +214,7 @@ class GuessClues(commands.Cog):
                 )
                 daily.setdefault("streaks", {})[user_id] = updated_streak
                 streak = updated_streak["count"]
+            daily.setdefault("resolved", {})[user_id] = sorted(game["resolved"])
             config.clues_store.set_daily_clues(daily)
             return "ok", attempt, streak
 
@@ -288,7 +290,11 @@ class GuessClues(commands.Cog):
             "criteria": criteria,
             "target_criteria": target_criteria,
             "target_word": word,
-            "resolved": set(),
+            "resolved": (
+                set(daily.get("resolved", {}).get(str(ctx.author.id), []))
+                if modo == "diario"
+                else set()
+            ),
             "attempts": attempts,
             "owner_id": ctx.author.id,
             "mode": modo,
@@ -358,6 +364,10 @@ class GuessClues(commands.Cog):
             set(game["criteria"]) & game["target_criteria"]
         ) <= guess_criteria
 
+        newly_resolved = (
+            guess_criteria & set(game["criteria"])
+        ) - game["resolved"]
+        game["resolved"].update(newly_resolved)
         if private:
             attempt, attempts, streak = await self.record_daily_attempt(
                 game, ctx.author.id, won, word
@@ -377,10 +387,6 @@ class GuessClues(commands.Cog):
             game["attempts"] = attempts
         else:
             game["attempts"] += 1
-        newly_resolved = (
-            guess_criteria & set(game["criteria"])
-        ) - game["resolved"]
-        game["resolved"].update(newly_resolved)
         result = (
             f"Resuelve **{len(newly_resolved)}** criterio(s)."
             if newly_resolved

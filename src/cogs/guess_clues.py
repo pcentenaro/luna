@@ -410,6 +410,13 @@ class GuessClues(commands.Cog):
                 lines.append(f"\n🔥 Tu racha: **{streak} {unit}**.")
                 lines.append(f"\n{daily_wait_message()}")
                 self.finish_game(key)
+                try:
+                    await ctx.channel.send(
+                        f"<@{ctx.author.id}> ha terminado el modo diario con "
+                        f"**{game['attempts']} {attempt_unit}** 🔥."
+                    )
+                except discord.HTTPException as error:
+                    print(f"No pude anunciar el resultado diario: {error}")
             elif has_invalid_criterion:
                 lines.append(
                     "\nCumple los tres criterios correctos, pero también "

@@ -293,17 +293,29 @@ class GuessClues(commands.Cog):
             "owner_id": ctx.author.id,
             "mode": modo,
             "daily_date": daily["date"] if modo == "diario" else None,
-            "expires_at": int(datetime.now(timezone.utc).timestamp())
-            + GAME_DURATION_SECONDS,
         }
         game = self.games[key]
-        game["timeout_task"] = asyncio.create_task(self.expire_game(key, ctx, game))
+        if modo != "diario":
+            game["expires_at"] = (
+                int(datetime.now(timezone.utc).timestamp()) + GAME_DURATION_SECONDS
+            )
+            game["timeout_task"] = asyncio.create_task(self.expire_game(key, ctx, game))
         rules = (
             "Prueba palabras hasta encontrar una que cumpla los tres criterios."
             if modo == "diario"
             else "Descubre los tres criterios que cumple la palabra base. "
             "Cualquier palabra válida que cumpla los tres gana."
         )
+        if modo == "diario":
+            await ctx.respond(
+                "## Guess the Clues\n"
+                f"Modo **{modo}**.\n"
+                f"{rules}\n\n"
+                f"{format_board(game)}\n\n"
+                "Usa `/clues guess palabra:` para jugar.",
+                ephemeral=True,
+            )
+            return
         await ctx.respond(
             "## Guess the Clues\n"
             f"Modo **{modo}**.\n"
@@ -491,9 +503,14 @@ class GuessClues(commands.Cog):
         if game is None:
             await ctx.respond("No hay partida activa. Usa `/clues start`.", ephemeral=True)
             return
+        timer = (
+            f"⏳ Tiempo restante: <t:{game['expires_at']}:R>.\n"
+            if "expires_at" in game
+            else ""
+        )
         await ctx.respond(
             f"{format_board(game)}\n\n"
-            f"⏳ Tiempo restante: <t:{game['expires_at']}:R>.\n"
+            f"{timer}"
             f"Intentos: {game['attempts']}",
             ephemeral=game.get("mode") == "diario",
         )

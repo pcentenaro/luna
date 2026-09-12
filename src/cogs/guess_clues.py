@@ -12,6 +12,7 @@ from discord.ext import commands, tasks
 
 RAE_API_URL = "https://rae-api.com/api"
 DAILY_TIME_ZONE = ZoneInfo("America/Los_Angeles")
+GAME_DURATION_SECONDS = 5 * 60
 VOWELS = set("aeiouáéíóúü")
 CRITERIA = {
     "starts_vowel": "Empieza con vocal",
@@ -72,6 +73,30 @@ class GuessClues(commands.Cog):
 
     def cog_unload(self):
         self.leaderboard_loop.cancel()
+        for game in self.games.values():
+            if timeout_task := game.get("timeout_task"):
+                timeout_task.cancel()
+
+    def finish_game(self, key):
+        game = self.games.pop(key, None)
+        if game and (timeout_task := game.get("timeout_task")):
+            timeout_task.cancel()
+
+    async def expire_game(self, key, ctx, game):
+        await asyncio.sleep(GAME_DURATION_SECONDS)
+        if self.games.get(key) is not game:
+            return
+        self.games.pop(key)
+        players = set(game.get("participants", ())) | {game["owner_id"]}
+        mentions = " ".join(f"<@{user_id}>" for user_id in sorted(players))
+        message = f"⌛ {mentions}, se acabaron los cinco minutos. La partida terminó."
+        try:
+            if game["mode"] == "diario":
+                await ctx.followup.send(message, ephemeral=True)
+            else:
+                await ctx.channel.send(message)
+        except discord.HTTPException as error:
+            print(f"No pude avisar que terminó una partida de Guess the Clues: {error}")
 
     @tasks.loop(minutes=1)
     async def leaderboard_loop(self):
@@ -268,8 +293,11 @@ class GuessClues(commands.Cog):
             "owner_id": ctx.author.id,
             "mode": modo,
             "daily_date": daily["date"] if modo == "diario" else None,
+            "expires_at": int(datetime.now(timezone.utc).timestamp())
+            + GAME_DURATION_SECONDS,
         }
         game = self.games[key]
+        game["timeout_task"] = asyncio.create_task(self.expire_game(key, ctx, game))
         rules = (
             "Prueba palabras hasta encontrar una que cumpla los tres criterios."
             if modo == "diario"
@@ -280,6 +308,7 @@ class GuessClues(commands.Cog):
             "## Guess the Clues\n"
             f"Modo **{modo}**.\n"
             f"{rules}\n\n"
+            f"⏳ Tiempo restante: <t:{game['expires_at']}:R>.\n\n"
             f"{format_board(game)}\n\n"
             "Usa `/clues guess palabra:` para jugar.",
             ephemeral=modo == "diario",
@@ -322,7 +351,7 @@ class GuessClues(commands.Cog):
                 game, ctx.author.id, won, word
             )
             if attempt != "ok":
-                del self.games[key]
+                self.finish_game(key)
                 message = (
                     "El desafío diario anterior ya terminó. Inicia el nuevo con "
                     "`/clues start modo:diario`."
@@ -362,7 +391,7 @@ class GuessClues(commands.Cog):
                 unit = "día" if streak == 1 else "días"
                 lines.append(f"\n🔥 Tu racha: **{streak} {unit}**.")
                 lines.append(f"\n{daily_wait_message()}")
-                del self.games[key]
+                self.finish_game(key)
             elif has_invalid_criterion:
                 lines.append(
                     "\nCumple los tres criterios correctos, pero también "
@@ -386,7 +415,7 @@ class GuessClues(commands.Cog):
                 f"{game['attempts']} intentos. Palabra base: "
                 f"**{game['target_word'].upper()}**."
             )
-            del self.games[key]
+            self.finish_game(key)
         elif has_invalid_criterion:
             lines.append(
                 "\nCumple los tres criterios correctos, pero también "
@@ -463,7 +492,9 @@ class GuessClues(commands.Cog):
             await ctx.respond("No hay partida activa. Usa `/clues start`.", ephemeral=True)
             return
         await ctx.respond(
-            f"{format_board(game)}\n\nIntentos: {game['attempts']}",
+            f"{format_board(game)}\n\n"
+            f"⏳ Tiempo restante: <t:{game['expires_at']}:R>.\n"
+            f"Intentos: {game['attempts']}",
             ephemeral=game.get("mode") == "diario",
         )
 
@@ -478,7 +509,7 @@ class GuessClues(commands.Cog):
             await ctx.respond("Solo quien inició la partida puede cancelarla.", ephemeral=True)
             return
         private = game.get("mode") == "diario"
-        del self.games[key]
+        self.finish_game(key)
         await ctx.respond("Partida cancelada.", ephemeral=private)
 
 

@@ -82,6 +82,12 @@ class GuessClues(commands.Cog):
         if game and (timeout_task := game.get("timeout_task")):
             timeout_task.cancel()
 
+    def reset_game_timeout(self, key, ctx, game):
+        if timeout_task := game.get("timeout_task"):
+            timeout_task.cancel()
+        game["expires_at"] = int(datetime.now(timezone.utc).timestamp()) + GAME_DURATION_SECONDS
+        game["timeout_task"] = asyncio.create_task(self.expire_game(key, ctx, game))
+
     async def expire_game(self, key, ctx, game):
         await asyncio.sleep(GAME_DURATION_SECONDS)
         if self.games.get(key) is not game:
@@ -304,10 +310,7 @@ class GuessClues(commands.Cog):
         game = self.games[key]
         config.clues_store.record_clues_start(ctx.author.id, modo, game["daily_date"])
         if modo != "diario":
-            game["expires_at"] = (
-                int(datetime.now(timezone.utc).timestamp()) + GAME_DURATION_SECONDS
-            )
-            game["timeout_task"] = asyncio.create_task(self.expire_game(key, ctx, game))
+            self.reset_game_timeout(key, ctx, game)
         rules = (
             "Prueba palabras hasta encontrar una que cumpla los tres criterios."
             if modo == "diario"
@@ -366,6 +369,8 @@ class GuessClues(commands.Cog):
             game.setdefault("participants", set()).add(ctx.author.id)
         guess_criteria = matching_criteria(word, entry)
         won = is_winning_guess(game, guess_criteria)
+        if not private:
+            self.reset_game_timeout(key, ctx, game)
         has_invalid_criterion = not won and (
             set(game["criteria"]) & game["target_criteria"]
         ) <= guess_criteria

@@ -138,6 +138,21 @@ class CluesStore:
                     attempts INTEGER NOT NULL,
                     completed_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS clues_starts (
+                    user_id INTEGER NOT NULL,
+                    mode TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    daily_date TEXT,
+                    UNIQUE(user_id, mode, daily_date)
+                );
+                INSERT INTO clues_starts (user_id, mode, started_at, daily_date)
+                SELECT user_id, mode, completed_at, NULL
+                FROM clues_results
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM clues_migrations WHERE name = 'clues_starts_backfill_v1'
+                );
+                INSERT OR IGNORE INTO clues_migrations (name)
+                VALUES ('clues_starts_backfill_v1');
                 """
             )
             self._migrate_json(connection, legacy_clues_path, legacy_config_path)
@@ -168,6 +183,16 @@ class CluesStore:
                 rows,
             )
 
+    def record_clues_start(
+        self, user_id: int, mode: str, daily_date: str | None = None
+    ):
+        started_at = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO clues_starts VALUES (?, ?, ?, ?)",
+                (int(user_id), mode, started_at, daily_date),
+            )
+
     def get_clues_stats(self, user_id: int) -> dict:
         with sqlite3.connect(self.database_path) as connection:
             completed, average, best = connection.execute(
@@ -180,12 +205,19 @@ class CluesStore:
                 "WHERE user_id = ? GROUP BY mode",
                 (user_id,),
             ).fetchall())
+            started_modes = dict(connection.execute(
+                "SELECT mode, COUNT(*) FROM clues_starts "
+                "WHERE user_id = ? GROUP BY mode",
+                (user_id,),
+            ).fetchall())
         return {
             "completed": completed,
             "average_attempts": average,
             "best_attempts": best,
             "modes": modes,
+            "started_modes": started_modes,
         }
+
     def get_leaderboard_channel_id(self, guild_id: int) -> int | None:
         with sqlite3.connect(self.database_path) as connection:
             row = connection.execute(
@@ -355,7 +387,8 @@ class EventDataStore:
             url="https://api.start.gg/gql/alpha",
             headers={"Authorization": f"Bearer {os.getenv("STARTGG_API_KEY")}"})
         self.gql_client = Client(transport=self.transport,
-                        fetch_schema_from_transport=False)
+                        fetch_schema_from_transport=False,
+                        execute_timeout=50)
 
     def __enter__(self):
         return self
@@ -477,7 +510,7 @@ class EventDataStore:
                 self.cursor.execute(
                     f"""
                     INSERT INTO links
-                        VALUES(?, ?, ?, ?, ?)
+                        VALUES(?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(startgg_player_id) DO UPDATE SET
                             startgg_gamer_tag = excluded.startgg_gamer_tag,
                             startgg_prefix = excluded.startgg_prefix,
@@ -488,6 +521,8 @@ class EventDataStore:
                         None,
                         player["gamerTag"],
                         player["prefix"],
+                        None,
+                        None,
                         datetime.now(timezone.utc).isoformat()
                     )
                 )
@@ -625,7 +660,7 @@ class EventDataStore:
                                 slots[1]["standing"]["placement"]
                             )
                         )
-            sleep(cooldown_secs)
+                sleep(cooldown_secs)
         self.connection.commit()
 
     def store_tournament_standings(self, cooldown_secs = 5):

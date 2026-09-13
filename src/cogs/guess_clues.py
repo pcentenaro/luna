@@ -12,6 +12,7 @@ from discord.ext import commands, tasks
 
 RAE_API_URL = "https://rae-api.com/api"
 DAILY_TIME_ZONE = ZoneInfo("America/Los_Angeles")
+GAME_DURATION_SECONDS = 5 * 60
 VOWELS = set("aeiouáéíóúü")
 CRITERIA = {
     "starts_vowel": "Empieza con vocal",
@@ -72,6 +73,30 @@ class GuessClues(commands.Cog):
 
     def cog_unload(self):
         self.leaderboard_loop.cancel()
+        for game in self.games.values():
+            if timeout_task := game.get("timeout_task"):
+                timeout_task.cancel()
+
+    def finish_game(self, key):
+        game = self.games.pop(key, None)
+        if game and (timeout_task := game.get("timeout_task")):
+            timeout_task.cancel()
+
+    async def expire_game(self, key, ctx, game):
+        await asyncio.sleep(GAME_DURATION_SECONDS)
+        if self.games.get(key) is not game:
+            return
+        self.games.pop(key)
+        players = set(game.get("participants", ())) | {game["owner_id"]}
+        mentions = " ".join(f"<@{user_id}>" for user_id in sorted(players))
+        message = f"⌛ {mentions}, se acabaron los cinco minutos. La partida terminó."
+        try:
+            if game["mode"] == "diario":
+                await ctx.followup.send(message, ephemeral=True)
+            else:
+                await ctx.channel.send(message)
+        except discord.HTTPException as error:
+            print(f"No pude avisar que terminó una partida de Guess the Clues: {error}")
 
     @tasks.loop(minutes=1)
     async def leaderboard_loop(self):
@@ -145,6 +170,7 @@ class GuessClues(commands.Cog):
                 "criteria": choose_round_criteria(target_criteria),
                 "players": [],
                 "attempts": {},
+                "resolved": {},
                 "results": {},
                 "winning_words": {},
                 "streaks": daily.get("streaks", {}) if daily else {},
@@ -188,6 +214,7 @@ class GuessClues(commands.Cog):
                 )
                 daily.setdefault("streaks", {})[user_id] = updated_streak
                 streak = updated_streak["count"]
+            daily.setdefault("resolved", {})[user_id] = sorted(game["resolved"])
             config.clues_store.set_daily_clues(daily)
             return "ok", attempt, streak
 
@@ -263,23 +290,45 @@ class GuessClues(commands.Cog):
             "criteria": criteria,
             "target_criteria": target_criteria,
             "target_word": word,
-            "resolved": set(),
+            "resolved": (
+                set(daily.get("resolved", {}).get(str(ctx.author.id), []))
+                if modo == "diario"
+                else set()
+            ),
             "attempts": attempts,
             "owner_id": ctx.author.id,
             "mode": modo,
             "daily_date": daily["date"] if modo == "diario" else None,
+            "started_users": {ctx.author.id},
         }
         game = self.games[key]
+        config.clues_store.record_clues_start(ctx.author.id, modo, game["daily_date"])
+        if modo != "diario":
+            game["expires_at"] = (
+                int(datetime.now(timezone.utc).timestamp()) + GAME_DURATION_SECONDS
+            )
+            game["timeout_task"] = asyncio.create_task(self.expire_game(key, ctx, game))
         rules = (
             "Prueba palabras hasta encontrar una que cumpla los tres criterios."
             if modo == "diario"
             else "Descubre los tres criterios que cumple la palabra base. "
             "Cualquier palabra válida que cumpla los tres gana."
         )
+        if modo == "diario":
+            await ctx.respond(
+                "## Guess the Clues\n"
+                f"Modo **{modo}**.\n"
+                f"{rules}\n\n"
+                f"{format_board(game)}\n\n"
+                "Usa `/clues guess palabra:` para jugar.",
+                ephemeral=True,
+            )
+            return
         await ctx.respond(
             "## Guess the Clues\n"
             f"Modo **{modo}**.\n"
             f"{rules}\n\n"
+            f"⏳ Tiempo restante: <t:{game['expires_at']}:R>.\n\n"
             f"{format_board(game)}\n\n"
             "Usa `/clues guess palabra:` para jugar.",
             ephemeral=modo == "diario",
@@ -310,6 +359,10 @@ class GuessClues(commands.Cog):
             await ctx.respond(f"`{word}` no aparece en el diccionario.", ephemeral=private)
             return
         if game["mode"] == "cooperativo":
+            started_users = game["started_users"]
+            if ctx.author.id not in started_users:
+                config.clues_store.record_clues_start(ctx.author.id, game["mode"])
+                started_users.add(ctx.author.id)
             game.setdefault("participants", set()).add(ctx.author.id)
         guess_criteria = matching_criteria(word, entry)
         won = is_winning_guess(game, guess_criteria)
@@ -317,12 +370,16 @@ class GuessClues(commands.Cog):
             set(game["criteria"]) & game["target_criteria"]
         ) <= guess_criteria
 
+        newly_resolved = (
+            guess_criteria & set(game["criteria"])
+        ) - game["resolved"]
+        game["resolved"].update(newly_resolved)
         if private:
             attempt, attempts, streak = await self.record_daily_attempt(
                 game, ctx.author.id, won, word
             )
             if attempt != "ok":
-                del self.games[key]
+                self.finish_game(key)
                 message = (
                     "El desafío diario anterior ya terminó. Inicia el nuevo con "
                     "`/clues start modo:diario`."
@@ -336,10 +393,6 @@ class GuessClues(commands.Cog):
             game["attempts"] = attempts
         else:
             game["attempts"] += 1
-        newly_resolved = (
-            guess_criteria & set(game["criteria"])
-        ) - game["resolved"]
-        game["resolved"].update(newly_resolved)
         result = (
             f"Resuelve **{len(newly_resolved)}** criterio(s)."
             if newly_resolved
@@ -352,7 +405,7 @@ class GuessClues(commands.Cog):
             config.clues_store.record_clues_results(
                 players, game["mode"], game["attempts"]
             )
-        lines = [f"**{word.upper()}** — {result}", "", format_board(game)]
+        lines = [f"**{word.upper()}** — {result}", "", format_board(game, guess_criteria)]
 
         if private:
             if won:
@@ -362,7 +415,14 @@ class GuessClues(commands.Cog):
                 unit = "día" if streak == 1 else "días"
                 lines.append(f"\n🔥 Tu racha: **{streak} {unit}**.")
                 lines.append(f"\n{daily_wait_message()}")
-                del self.games[key]
+                self.finish_game(key)
+                try:
+                    await ctx.channel.send(
+                        f"<@{ctx.author.id}> ha terminado el modo diario con "
+                        f"**{game['attempts']} {attempt_unit}** 🔥."
+                    )
+                except discord.HTTPException as error:
+                    print(f"No pude anunciar el resultado diario: {error}")
             elif has_invalid_criterion:
                 lines.append(
                     "\nCumple los tres criterios correctos, pero también "
@@ -386,7 +446,7 @@ class GuessClues(commands.Cog):
                 f"{game['attempts']} intentos. Palabra base: "
                 f"**{game['target_word'].upper()}**."
             )
-            del self.games[key]
+            self.finish_game(key)
         elif has_invalid_criterion:
             lines.append(
                 "\nCumple los tres criterios correctos, pero también "
@@ -427,6 +487,7 @@ class GuessClues(commands.Cog):
         )
         best_streak = int(streak.get("best", streak.get("count", 0)))
         modes = player_stats["modes"]
+        started_modes = player_stats["started_modes"]
         best_unit = (
             "intento" if player_stats["best_attempts"] == 1 else "intentos"
         )
@@ -437,10 +498,13 @@ class GuessClues(commands.Cog):
             f"⭐ Mejor resultado: **{player_stats['best_attempts']} {best_unit}**\n"
             f"🔥 Racha actual: **{current_streak} días**\n"
             f"👑 Mejor racha: **{best_streak} días**\n\n"
-            "**Por modo:**\n"
-            f"• Individual: **{modes.get('individual', 0)}**\n"
-            f"• Cooperativo: **{modes.get('cooperativo', 0)}**\n"
-            f"• Diario: **{modes.get('diario', 0)}**"
+            "**Por modo — completadas (iniciadas):**\n"
+            f"• Individual: **{modes.get('individual', 0)} "
+            f"({started_modes.get('individual', 0)})**\n"
+            f"• Cooperativo: **{modes.get('cooperativo', 0)} "
+            f"({started_modes.get('cooperativo', 0)})**\n"
+            f"• Diario: **{modes.get('diario', 0)} "
+            f"({started_modes.get('diario', 0)})**"
         )
 
 
@@ -462,8 +526,15 @@ class GuessClues(commands.Cog):
         if game is None:
             await ctx.respond("No hay partida activa. Usa `/clues start`.", ephemeral=True)
             return
+        timer = (
+            f"⏳ Tiempo restante: <t:{game['expires_at']}:R>.\n"
+            if "expires_at" in game
+            else ""
+        )
         await ctx.respond(
-            f"{format_board(game)}\n\nIntentos: {game['attempts']}",
+            f"{format_board(game)}\n\n"
+            f"{timer}"
+            f"Intentos: {game['attempts']}",
             ephemeral=game.get("mode") == "diario",
         )
 
@@ -478,7 +549,7 @@ class GuessClues(commands.Cog):
             await ctx.respond("Solo quien inició la partida puede cancelarla.", ephemeral=True)
             return
         private = game.get("mode") == "diario"
-        del self.games[key]
+        self.finish_game(key)
         await ctx.respond("Partida cancelada.", ephemeral=private)
 
 
@@ -632,8 +703,9 @@ def choose_round_criteria(target_criteria: set[str]) -> list[str]:
     return selected
 
 
-def format_board(game: dict) -> str:
+def format_board(game: dict, matches: set[str] | None = None) -> str:
     lines = []
+    matches = matches or set()
     for key in game["criteria"]:
         if key not in game["resolved"]:
             marker = "❓"
@@ -641,7 +713,8 @@ def format_board(game: dict) -> str:
             marker = "✅"
         else:
             marker = "❌"
-        lines.append(f"{marker} {CRITERIA[key]}")
+        criterion = f"**{CRITERIA[key]}**" if key in matches else CRITERIA[key]
+        lines.append(f"{marker} {criterion}")
     return "\n".join(lines)
 
 

@@ -299,8 +299,10 @@ class GuessClues(commands.Cog):
             "owner_id": ctx.author.id,
             "mode": modo,
             "daily_date": daily["date"] if modo == "diario" else None,
+            "started_users": {ctx.author.id},
         }
         game = self.games[key]
+        config.clues_store.record_clues_start(ctx.author.id, modo, game["daily_date"])
         if modo != "diario":
             game["expires_at"] = (
                 int(datetime.now(timezone.utc).timestamp()) + GAME_DURATION_SECONDS
@@ -357,6 +359,10 @@ class GuessClues(commands.Cog):
             await ctx.respond(f"`{word}` no aparece en el diccionario.", ephemeral=private)
             return
         if game["mode"] == "cooperativo":
+            started_users = game["started_users"]
+            if ctx.author.id not in started_users:
+                config.clues_store.record_clues_start(ctx.author.id, game["mode"])
+                started_users.add(ctx.author.id)
             game.setdefault("participants", set()).add(ctx.author.id)
         guess_criteria = matching_criteria(word, entry)
         won = is_winning_guess(game, guess_criteria)
@@ -481,6 +487,7 @@ class GuessClues(commands.Cog):
         )
         best_streak = int(streak.get("best", streak.get("count", 0)))
         modes = player_stats["modes"]
+        started_modes = player_stats["started_modes"]
         best_unit = (
             "intento" if player_stats["best_attempts"] == 1 else "intentos"
         )
@@ -491,10 +498,13 @@ class GuessClues(commands.Cog):
             f"⭐ Mejor resultado: **{player_stats['best_attempts']} {best_unit}**\n"
             f"🔥 Racha actual: **{current_streak} días**\n"
             f"👑 Mejor racha: **{best_streak} días**\n\n"
-            "**Por modo:**\n"
-            f"• Individual: **{modes.get('individual', 0)}**\n"
-            f"• Cooperativo: **{modes.get('cooperativo', 0)}**\n"
-            f"• Diario: **{modes.get('diario', 0)}**"
+            "**Por modo — completadas (iniciadas):**\n"
+            f"• Individual: **{modes.get('individual', 0)} "
+            f"({started_modes.get('individual', 0)})**\n"
+            f"• Cooperativo: **{modes.get('cooperativo', 0)} "
+            f"({started_modes.get('cooperativo', 0)})**\n"
+            f"• Diario: **{modes.get('diario', 0)} "
+            f"({started_modes.get('diario', 0)})**"
         )
 
 

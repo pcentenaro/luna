@@ -471,6 +471,8 @@ class GuessClues(commands.Cog):
             lines.append(f"\nQuedan **{len(remaining)}** criterios correctos por descubrir.")
         else:
             lines.append("\nYa conoces los tres criterios. Prueba una palabra que cumpla los tres a la vez.")
+        if not won:
+            lines.append(f"\n⏳ Tiempo restante: <t:{game['expires_at']}:R>.")
         await ctx.respond("\n".join(lines), ephemeral=ephemeral)
     @clues.command(name="stats", description="Muestra estadísticas de Guess the Clues")
     async def stats(

@@ -97,7 +97,7 @@ class GuessClues(commands.Cog):
         mentions = " ".join(f"<@{user_id}>" for user_id in sorted(players))
         message = f"⌛ {mentions}, se acabaron los cinco minutos. La partida terminó."
         try:
-            if game["mode"] == "diario":
+            if uses_ephemeral_responses(game):
                 await ctx.followup.send(message, ephemeral=True)
             else:
                 await ctx.channel.send(message)
@@ -237,10 +237,23 @@ class GuessClues(commands.Cog):
             required=False,
             default="individual",
         ),
+        privado: bool = discord.Option(
+            bool,
+            description="Oculta la partida al resto del canal",
+            required=False,
+            default=False,
+        ),
     ):
         if not config.rae_api_key:
             await ctx.respond("RAE_API_KEY no está configurada.", ephemeral=True)
             return
+        if privado and modo != "individual":
+            await ctx.respond(
+                "La opción privada solo está disponible en modo individual.",
+                ephemeral=True,
+            )
+            return
+        ephemeral = modo == "diario" or privado
         if modo == "diario":
             today, reset_at = daily_window()
             daily = config.clues_store.get_daily_clues()
@@ -275,7 +288,7 @@ class GuessClues(commands.Cog):
             )
             return
 
-        await ctx.defer(ephemeral=modo == "diario")
+        await ctx.defer(ephemeral=ephemeral)
         try:
             if modo == "diario":
                 daily = await self.get_daily_challenge()
@@ -305,6 +318,7 @@ class GuessClues(commands.Cog):
             "owner_id": ctx.author.id,
             "mode": modo,
             "daily_date": daily["date"] if modo == "diario" else None,
+            "private": privado,
             "started_users": {ctx.author.id},
         }
         game = self.games[key]
@@ -334,7 +348,7 @@ class GuessClues(commands.Cog):
             f"⏳ Tiempo restante: <t:{game['expires_at']}:R>.\n\n"
             f"{format_board(game)}\n\n"
             "Usa `/clues guess palabra:` para jugar.",
-            ephemeral=modo == "diario",
+            ephemeral=ephemeral,
         )
 
     @clues.command(name="guess", description="Prueba una palabra española")
@@ -345,13 +359,14 @@ class GuessClues(commands.Cog):
             await ctx.respond("No hay partida activa. Usa `/clues start`.", ephemeral=True)
             return
 
-        private = game.get("mode") == "diario"
+        daily_mode = game.get("mode") == "diario"
+        ephemeral = uses_ephemeral_responses(game)
         word = normalize_word(palabra)
         if word is None:
             await ctx.respond("Escribe una sola palabra formada únicamente por letras.", ephemeral=True)
             return
 
-        await ctx.defer(ephemeral=private)
+        await ctx.defer(ephemeral=ephemeral)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 entry = await fetch_entry(session, word)
@@ -359,7 +374,7 @@ class GuessClues(commands.Cog):
             await ctx.respond(f"No pude consultar RAE API: {error}", ephemeral=True)
             return
         if entry is None:
-            await ctx.respond(f"`{word}` no aparece en el diccionario.", ephemeral=private)
+            await ctx.respond(f"`{word}` no aparece en el diccionario.", ephemeral=ephemeral)
             return
         if game["mode"] == "cooperativo":
             started_users = game["started_users"]
@@ -369,7 +384,7 @@ class GuessClues(commands.Cog):
             game.setdefault("participants", set()).add(ctx.author.id)
         guess_criteria = matching_criteria(word, entry)
         won = is_winning_guess(game, guess_criteria)
-        if not private:
+        if not daily_mode:
             self.reset_game_timeout(key, ctx, game)
         has_invalid_criterion = not won and (
             set(game["criteria"]) & game["target_criteria"]
@@ -379,7 +394,7 @@ class GuessClues(commands.Cog):
             guess_criteria & set(game["criteria"])
         ) - game["resolved"]
         game["resolved"].update(newly_resolved)
-        if private:
+        if daily_mode:
             attempt, attempts, streak = await self.record_daily_attempt(
                 game, ctx.author.id, won, word
             )
@@ -394,7 +409,7 @@ class GuessClues(commands.Cog):
                 await ctx.respond(message, ephemeral=True)
                 return
 
-        if private:
+        if daily_mode:
             game["attempts"] = attempts
         else:
             game["attempts"] += 1
@@ -412,7 +427,7 @@ class GuessClues(commands.Cog):
             )
         lines = [f"**{word.upper()}** — {result}", "", format_board(game, guess_criteria)]
 
-        if private:
+        if daily_mode:
             if won:
                 lines.append("\n🎉 Cumpliste los tres criterios.")
                 attempt_unit = "intento" if game["attempts"] == 1 else "intentos"
@@ -461,7 +476,7 @@ class GuessClues(commands.Cog):
             lines.append(f"\nQuedan **{len(remaining)}** criterios correctos por descubrir.")
         else:
             lines.append("\nYa conoces los tres criterios. Prueba una palabra que cumpla los tres a la vez.")
-        await ctx.respond("\n".join(lines))
+        await ctx.respond("\n".join(lines), ephemeral=ephemeral)
     @clues.command(name="stats", description="Muestra estadísticas de Guess the Clues")
     async def stats(
         self,
@@ -540,7 +555,7 @@ class GuessClues(commands.Cog):
             f"{format_board(game)}\n\n"
             f"{timer}"
             f"Intentos: {game['attempts']}",
-            ephemeral=game.get("mode") == "diario",
+            ephemeral=uses_ephemeral_responses(game),
         )
 
     @clues.command(name="stop", description="Cancela la partida de este canal")
@@ -553,9 +568,9 @@ class GuessClues(commands.Cog):
         if ctx.author.id != game["owner_id"]:
             await ctx.respond("Solo quien inició la partida puede cancelarla.", ephemeral=True)
             return
-        private = game.get("mode") == "diario"
+        ephemeral = uses_ephemeral_responses(game)
         self.finish_game(key)
-        await ctx.respond("Partida cancelada.", ephemeral=private)
+        await ctx.respond("Partida cancelada.", ephemeral=ephemeral)
 
 
 def setup(bot):
@@ -579,6 +594,10 @@ def daily_wait_message(reset_at: int | None = None, streak: int | None = None) -
         return message
     unit = "día" if streak == 1 else "días"
     return f"{message}\n🔥 Tu racha: **{streak} {unit}**."
+
+
+def uses_ephemeral_responses(game: dict) -> bool:
+    return game.get("mode") == "diario" or game.get("private", False)
 
 
 def daily_streak(daily: dict, user_id: int | str) -> int:

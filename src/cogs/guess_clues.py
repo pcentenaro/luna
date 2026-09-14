@@ -95,7 +95,10 @@ class GuessClues(commands.Cog):
         self.games.pop(key)
         players = set(game.get("participants", ())) | {game["owner_id"]}
         mentions = " ".join(f"<@{user_id}>" for user_id in sorted(players))
-        message = f"⌛ {mentions}, se acabaron los cinco minutos. La partida terminó."
+        message = (
+            f"⌛ {mentions}, se acabaron los cinco minutos. La partida terminó. "
+            f"Palabra base: **{game['target_word'].upper()}**."
+        )
         try:
             if uses_ephemeral_responses(game):
                 await ctx.followup.send(message, ephemeral=True)

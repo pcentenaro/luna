@@ -236,27 +236,19 @@ class GuessClues(commands.Cog):
         modo: str = discord.Option(
             str,
             description="Quién puede jugar esta partida",
-            choices=["individual", "cooperativo", "diario"],
+            choices=["individual", "individual privado", "cooperativo", "diario"],
             required=False,
             default="individual",
-        ),
-        privado: bool = discord.Option(
-            bool,
-            description="Oculta la partida al resto del canal",
-            required=False,
-            default=False,
         ),
     ):
         if not config.rae_api_key:
             await ctx.respond("RAE_API_KEY no está configurada.", ephemeral=True)
             return
-        if privado and modo != "individual":
-            await ctx.respond(
-                "La opción privada solo está disponible en modo individual.",
-                ephemeral=True,
-            )
-            return
-        ephemeral = modo == "diario" or privado
+        private = modo == "individual privado"
+        if private:
+            modo = "individual"
+        mode_label = "individual privado" if private else modo
+        ephemeral = modo == "diario" or private
         if modo == "diario":
             today, reset_at = daily_window()
             daily = config.clues_store.get_daily_clues()
@@ -321,7 +313,7 @@ class GuessClues(commands.Cog):
             "owner_id": ctx.author.id,
             "mode": modo,
             "daily_date": daily["date"] if modo == "diario" else None,
-            "private": privado,
+            "private": private,
             "started_users": {ctx.author.id},
         }
         game = self.games[key]
@@ -337,7 +329,7 @@ class GuessClues(commands.Cog):
         if modo == "diario":
             await ctx.respond(
                 "## Guess the Clues\n"
-                f"Modo **{modo}**.\n"
+                f"Modo **{mode_label}**.\n"
                 f"{rules}\n\n"
                 f"{format_board(game)}\n\n"
                 "Usa `/clues guess palabra:` para jugar.",
@@ -346,7 +338,7 @@ class GuessClues(commands.Cog):
             return
         await ctx.respond(
             "## Guess the Clues\n"
-            f"Modo **{modo}**.\n"
+            f"Modo **{mode_label}**.\n"
             f"{rules}\n\n"
             f"⏳ Tiempo restante: <t:{game['expires_at']}:R>.\n\n"
             f"{format_board(game)}\n\n"

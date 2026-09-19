@@ -1,4 +1,4 @@
 py-cord
 python-dotenv
 aiohttp
-cairosvg
+gql

@@ -40,6 +40,11 @@ class StartGGClient:
                 id
                 slug
                 name
+                player {
+                  id
+                  gamerTag
+                  prefix
+                }
               }
             }
             """
@@ -94,6 +99,53 @@ class StartGGClient:
         )
         return data.get("event")
 
+    async def get_event_entrants(self, event_id: int, per_page: int = 50) -> list[dict]:
+        entrants = []
+        page = 1
+
+        while True:
+            data = await self.query(
+                """
+                query EventEntrants($eventId: ID!, $page: Int!, $perPage: Int!) {
+                  event(id: $eventId) {
+                    entrants(query: {page: $page, perPage: $perPage}) {
+                      pageInfo {
+                        page
+                        totalPages
+                        total
+                      }
+                      nodes {
+                        id
+                        name
+                        participants {
+                          id
+                          gamerTag
+                          player {
+                            id
+                            gamerTag
+                            prefix
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """,
+                {"eventId": event_id, "page": page, "perPage": per_page},
+            )
+            event = data.get("event")
+            if event is None:
+                return []
+
+            connection = event.get("entrants") or {}
+            entrants.extend(connection.get("nodes") or [])
+            page_info = connection.get("pageInfo") or {}
+            total_pages = int(page_info.get("totalPages") or 1)
+            if page >= total_pages:
+                return entrants
+
+            page += 1
+
     async def get_event_phases(self, event_id: int) -> list[dict]:
         data = await self.query(
             """
@@ -120,6 +172,7 @@ class StartGGClient:
                 phaseGroups(query: {perPage: 50}) {
                   nodes {
                     id
+                    bracketType
                     displayIdentifier
                     state
                     wave {
@@ -147,7 +200,12 @@ class StartGGClient:
                     fullRoundText
                     round
                     state
+                    winnerId
                     slots {
+                      prereqId
+                      prereqPlacement
+                      prereqType
+                      slotIndex
                       standing {
                         stats {
                           score {
@@ -178,6 +236,34 @@ class StartGGClient:
         sets = phase_group.get("sets", {}) if phase_group else {}
         return sets.get("nodes", [])
 
+    async def get_phase_group_standings(self, phase_group_id: int) -> list[dict]:
+        data = await self.query(
+            """
+            query PhaseGroupStandings($phaseGroupId: ID!) {
+              phaseGroup(id: $phaseGroupId) {
+                standings(query: {page: 1, perPage: 100}) {
+                  nodes {
+                    placement
+                    entrant {
+                      id
+                      name
+                      participants {
+                        player {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """,
+            {"phaseGroupId": phase_group_id},
+        )
+        phase_group = data.get("phaseGroup")
+        standings = phase_group.get("standings", {}) if phase_group else {}
+        return standings.get("nodes", [])
+
     async def get_set(self, set_id: int) -> dict | None:
         data = await self.query(
             """
@@ -188,6 +274,10 @@ class StartGGClient:
                 round
                 state
                 slots {
+                  prereqId
+                  prereqPlacement
+                  prereqType
+                  slotIndex
                   standing {
                     stats {
                       score {
@@ -218,12 +308,13 @@ class StartGGClient:
         self,
         set_id: int,
         winner_id: int,
+        is_dq: bool = False,
         game_data: list[dict] | None = None,
     ) -> dict | None:
         data = await self.query(
             """
-            mutation ReportSet($setId: ID!, $winnerId: ID!, $gameData: [BracketSetGameDataInput]) {
-              reportBracketSet(setId: $setId, winnerId: $winnerId, gameData: $gameData) {
+            mutation ReportSet($setId: ID!, $winnerId: ID!, $isDQ: Boolean, $gameData: [BracketSetGameDataInput]) {
+              reportBracketSet(setId: $setId, winnerId: $winnerId, isDQ: $isDQ, gameData: $gameData) {
                 id
                 state
               }
@@ -232,7 +323,20 @@ class StartGGClient:
             {
                 "setId": set_id,
                 "winnerId": winner_id,
+                "isDQ": is_dq,
                 "gameData": game_data,
             },
         )
         return data.get("reportBracketSet")
+
+
+def format_user_display_name(user: dict) -> str:
+    player = user.get("player") or {}
+    gamer_tag = player.get("gamerTag")
+    prefix = player.get("prefix")
+    if gamer_tag and prefix:
+        return f"{prefix} | {gamer_tag}"
+    if gamer_tag:
+        return gamer_tag
+
+    return user.get("name") or user.get("slug") or user.get("id")

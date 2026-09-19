@@ -72,18 +72,18 @@ If the bot is not running in AWS, you can start it by running the following comm
 
 ```bash
 source [path/to/repo/root/venv/bin/activate]
-nohup python3 [path/to/main.py] &
+nohup python3 [path/to/main.py] >luna.log 2>&1 &
 ```
 
-This runs the main script within the EC2 instance. The `&` at the end of the command tells the terminal to run it in the background, so you can resume your activities after starting the bot. The `nohup` command launches the Python process with persistency settings, which means that the script will keep running even after you disconnect from the instance.
+This runs the main script within the EC2 instance. The `&` at the end of the command tells the terminal to run it in the background, so you can resume your activities after starting the bot. The `nohup` command launches the Python process with persistency settings, which means that the script will keep running even after you disconnect from the instance. `>luna.log 2>&1` ensures that the process keeps running after the SSH session is closed by redirecting the program's standard output to a file, instead of keeping it connected to the SSH session. It also reroutes `stderr` to `stdout`, effectively passing error messages to `luna.log` as well.
 
 If you need to stop the bot from running, you have to locate its process ID (PID). Run this command:
 
 ```bash
-ps -af | grep "python3"
+ps aux | grep "python3"
 ```
 
-Here, `ps -af` lists all the running processes (`-a` flag), and shows the list of arguments in full (`-f` flag). The output of this command is passed to `grep`, which filters all the processes containing the term `python3`. Locate the line containing `python3 [path/to/main.py]`, get the PID, and run the following command to stop the bot:
+Here, `ps aux` lists all the running processes. The output of this command is passed to `grep`, which filters all the processes containing the term `python3`. Locate the line containing `python3 [path/to/main.py]`, get the PID, and run the following command to stop the bot:
 
 ```bash
 kill [PID]

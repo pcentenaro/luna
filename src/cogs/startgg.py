@@ -631,7 +631,7 @@ class ReportConfirmationView(discord.ui.View):
             return
 
         set_id = int(self.match["set"]["id"])
-        remove_cached_set(self.active_event, set_id)
+        mark_cached_set_completed(self.active_event, set_id, self.report["winner_entrant_id"])
         release_pending_report(set_id, self.player_discord_ids)
         report_message = build_player_report_success_message(self.match, self.report, self.active_event)
         await interaction.message.edit(
@@ -804,7 +804,7 @@ class DQReportModal(discord.ui.Modal):
             return
 
         set_id = int(self.report_view.match["set"]["id"])
-        remove_cached_set(self.report_view.active_event, set_id)
+        mark_cached_set_completed(self.report_view.active_event, set_id, dq_report["winner_entrant_id"])
         release_pending_report(set_id, self.report_view.player_discord_ids)
         message = self.report_view.message
         if message:
@@ -948,24 +948,27 @@ def release_pending_report(set_id: int, player_discord_ids: set[int]):
 
 async def refresh_event_cache(active_event: dict) -> list[dict]:
     async with event_cache_lock:
-        matches = await find_reportable_sets_for_event(active_event["event_id"])
+        state = await fetch_event_state(active_event["event_id"])
         event_cache.clear()
         event_cache.update(
             {
                 "event_id": active_event["event_id"],
                 "event_name": active_event["event_name"],
-                "matches": matches,
+                **state,
                 "updated_at": datetime.now(timezone.utc),
             }
         )
-        return matches
+        return get_cached_reportable_matches(active_event)
 
 
 def get_cached_reportable_matches(active_event: dict) -> list[dict] | None:
     if event_cache.get("event_id") != active_event["event_id"]:
         return None
 
-    return list(event_cache.get("matches") or [])
+    return [
+        match for match in event_cache.get("matches") or []
+        if is_active_phase_group(match["phase_group"]) and is_reportable_set(match["set"])
+    ]
 
 
 def get_cached_reportable_sets_for_player(active_event: dict, player_id: int) -> list[dict] | None:
@@ -979,14 +982,14 @@ def get_cached_reportable_sets_for_player(active_event: dict, player_id: int) ->
     ]
 
 
-def remove_cached_set(active_event: dict, set_id: int):
+def mark_cached_set_completed(active_event: dict, set_id: int, winner_id: int):
     if event_cache.get("event_id") != active_event["event_id"]:
         return
 
-    event_cache["matches"] = [
-        match for match in event_cache.get("matches") or []
-        if str(match["set"].get("id")) != str(set_id)
-    ]
+    for match in event_cache.get("matches") or []:
+        if str(match["set"].get("id")) == str(set_id):
+            match["set"] = {**match["set"], "state": 3, "winnerId": winner_id}
+            return
 
 
 async def announce_ready_matches(channel, active_event: dict, reping: bool = False) -> int:
@@ -1469,22 +1472,32 @@ async def fetch_reportable_phase_group_matches(phase: dict, phase_group: dict) -
     return matches
 
 
-async def find_sets_for_event(event_id: int) -> list[dict]:
-    matches = []
+async def fetch_event_state(event_id: int) -> dict:
     phases = await config.startgg_client.get_event_phases(event_id)
-    for phase in phases:
-        phase_groups = await config.startgg_client.get_phase_groups(int(phase["id"]))
-        for phase_group in phase_groups:
-            sets = await config.startgg_client.get_phase_group_sets(int(phase_group["id"]))
-            for set_data in sets:
-                matches.append(
-                    {
-                        "phase": phase,
-                        "phase_group": phase_group,
-                        "set": set_data,
-                    }
-                )
-    return sort_set_matches(matches)
+    group_results = await asyncio.gather(*[
+        config.startgg_client.get_phase_groups(int(phase["id"]))
+        for phase in phases
+    ])
+    phase_groups = {int(phase["id"]): groups for phase, groups in zip(phases, group_results)}
+    groups_with_phases = [
+        (phase, group)
+        for phase in phases
+        for group in phase_groups[int(phase["id"])]
+    ]
+    set_results = await asyncio.gather(*[
+        config.startgg_client.get_phase_group_sets(int(group["id"]))
+        for _, group in groups_with_phases
+    ])
+    matches = [
+        {"phase": phase, "phase_group": group, "set": set_data}
+        for (phase, group), sets in zip(groups_with_phases, set_results)
+        for set_data in sets
+    ]
+    return {"phases": phases, "phase_groups": phase_groups, "matches": sort_set_matches(matches)}
+
+
+async def find_sets_for_event(event_id: int) -> list[dict]:
+    return (await fetch_event_state(event_id))["matches"]
 
 
 def is_active_phase_group(phase_group: dict) -> bool:

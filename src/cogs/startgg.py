@@ -111,18 +111,18 @@ class Startgg(commands.Cog):
         if active_event is None:
             await ctx.respond("No active start.gg event is configured yet.")
             return
-        await ctx.defer()
-        try:
-            phases = await config.startgg_client.get_event_phases(active_event["event_id"])
-        except StartGGError as error:
-            await ctx.respond(f"Could not read start.gg phases: {error}", ephemeral=True)
+        cached_event = event_cache.copy()
+        if cached_event.get("event_id") != active_event["event_id"]:
+            await ctx.respond("Event cache is not ready. Ask a Luna admin to use `/refresh_event` first.", ephemeral=True)
             return
+        await ctx.defer()
+        phases = cached_event["phases"]
         event_url = f"https://www.start.gg/{active_event['event_slug']}"
         embed_fields = [
             discord.EmbedField("event link", event_url, False)
         ]
         for phase in phases:
-            phase_groups = await config.startgg_client.get_phase_groups(phase["id"])
+            phase_groups = cached_event["phase_groups"][int(phase["id"])]
             phase_state = min([group["state"] for group in phase_groups]) if phase_groups else None
             fields = [
                 discord.EmbedField("phase", f"[{phase["name"]}](https://www.start.gg/{active_event["event_slug"]}/brackets/{phase["id"]})", True),

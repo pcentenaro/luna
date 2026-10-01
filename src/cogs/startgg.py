@@ -459,8 +459,17 @@ class Startgg(commands.Cog):
             await ctx.respond(f"Could not refresh start.gg event data: {error}", ephemeral=True)
             return
 
+        try:
+            pinged_count = await announce_ready_matches_from_cache(ctx.channel, active_event, reopened_only=True)
+        except discord.HTTPException as error:
+            await ctx.respond(f"Event data refreshed, but reopened match announcements failed: {error}. Retry `/refresh_event`.", ephemeral=True)
+            return
+        if pinged_count is None:
+            await ctx.respond("The active event changed. Run the command again.", ephemeral=True)
+            return
         await ctx.respond(
-            f"Refreshed {active_event['event_name']}: {len(matches)} reportable set(s) cached.",
+            f"Refreshed {active_event['event_name']}: {len(matches)} reportable set(s) cached. "
+            f"Announced {pinged_count} reopened match(es).",
             ephemeral=True,
         )
 
@@ -499,6 +508,8 @@ def build_phase_group_links(active_event: dict, phase: dict, phase_groups: list[
 pending_report_user_ids_by_set: dict[int, set[int]] = {}
 pending_report_set_id_by_user: dict[int, int] = {}
 pinged_ready_set_ids: set[int] = set()
+reopened_set_ids: set[int] = set()
+match_announcement_lock = asyncio.Lock()
 pinged_waiting_players: set[tuple[int, int]] = set()
 announced_completed_phase_group_ids: set[int] = set()
 event_cache: dict = {}
@@ -516,6 +527,7 @@ def invalidate_event_state():
     pending_report_user_ids_by_set.clear()
     pending_report_set_id_by_user.clear()
     pinged_ready_set_ids.clear()
+    reopened_set_ids.clear()
     pinged_waiting_players.clear()
     announced_completed_phase_group_ids.clear()
 
@@ -1010,6 +1022,27 @@ async def _refresh_event_cache(active_event: dict, generation: int) -> list[dict
         if revision == event_results_revision:
             break
         # A result was confirmed during the download; fetch a newer snapshot.
+    previous_sets = {
+        str(match["set"]["id"]): match["set"]
+        for match in event_cache.get("matches", [])
+    } if event_cache.get("event_id") == active_event["event_id"] else {}
+    reopened = {
+        int(match["set"]["id"])
+        for match in state["matches"]
+        if is_real_set_id(match["set"])
+        and is_pending_set(match["set"])
+        and (previous := previous_sets.get(str(match["set"]["id"]))) is not None
+        and not is_pending_set(previous)
+    }
+    reopened_set_ids.update(reopened)
+    reopened_set_ids.intersection_update(
+        int(match["set"]["id"]) for match in state["matches"]
+        if is_real_set_id(match["set"]) and is_pending_set(match["set"])
+    )
+    pinged_ready_set_ids.difference_update(reopened)
+    pinged_waiting_players.difference_update({
+        key for key in pinged_waiting_players if key[1] in reopened
+    })
     event_cache.clear()
     event_cache.update(
         {
@@ -1063,20 +1096,27 @@ async def announce_ready_matches(channel, active_event: dict, reping: bool = Fal
     return await announce_ready_matches_for_matches(channel, event_matches, reping=reping)
 
 
-async def announce_ready_matches_from_cache(channel, active_event: dict, reping: bool = False) -> int | None:
-    event_matches = get_cached_reportable_matches(active_event)
-    if event_matches is None:
-        return None
+async def announce_ready_matches_from_cache(channel, active_event: dict, reping: bool = False, reopened_only: bool = False) -> int | None:
+    generation = event_generation
+    async with match_announcement_lock:
+        if generation != event_generation or not is_current_event(active_event):
+            return None
+        event_matches = get_cached_reportable_matches(active_event)
+        if event_matches is None:
+            return None
+        return await announce_ready_matches_for_matches(
+            channel, event_matches, reping=reping,
+            only_set_ids=set(reopened_set_ids) if reopened_only else None,
+        )
 
-    return await announce_ready_matches_for_matches(channel, event_matches, reping=reping)
 
-
-async def announce_ready_matches_for_matches(channel, event_matches: list[dict], reping: bool = False) -> int:
+async def announce_ready_matches_for_matches(channel, event_matches: list[dict], reping: bool = False, only_set_ids: set[int] | None = None) -> int:
     generation = event_generation
     ready_matches = find_ready_matches_for_ping(event_matches)
     new_ready_matches = [
         match for match in ready_matches
-        if reping or int(match["set"]["id"]) not in pinged_ready_set_ids
+        if (reping or int(match["set"]["id"]) not in pinged_ready_set_ids)
+        and (only_set_ids is None or int(match["set"]["id"]) in only_set_ids)
     ]
 
     for match in new_ready_matches:
@@ -1090,11 +1130,13 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
         if generation != event_generation:
             return 0
         pinged_ready_set_ids.add(set_id)
+        reopened_set_ids.discard(set_id)
 
     waiting_players = find_waiting_players_for_ping(event_matches, ready_matches)
     new_waiting_players = [
         waiting_player for waiting_player in waiting_players
-        if reping or waiting_player_key(waiting_player) not in pinged_waiting_players
+        if (reping or waiting_player_key(waiting_player) not in pinged_waiting_players)
+        and (only_set_ids is None or waiting_player_key(waiting_player)[1] in only_set_ids)
     ]
     for waiting_player in new_waiting_players:
         content, embed = build_waiting_player_ping(waiting_player)

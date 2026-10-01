@@ -302,7 +302,7 @@ class Startgg(commands.Cog):
                     allowed_mentions=discord.AllowedMentions(users=True),
                 )
             except Exception:
-                release_pending_report(set_id, player_discord_ids)
+                release_pending_report(set_id, player_discord_ids, active_event)
                 raise
         except asyncio.TimeoutError:
             await ctx.respond("start.gg took too long to return your sets. Try again in a moment.", ephemeral=True)
@@ -369,7 +369,7 @@ class Startgg(commands.Cog):
                     view=view,
                 )
             except Exception:
-                release_pending_report(set_id, player_discord_ids)
+                release_pending_report(set_id, player_discord_ids, active_event)
                 raise
         except asyncio.TimeoutError:
             await ctx.respond("start.gg took too long to return your sets. Try again in a moment.", ephemeral=True)
@@ -490,6 +490,22 @@ pinged_waiting_players: set[tuple[int, int]] = set()
 announced_completed_phase_group_ids: set[int] = set()
 event_cache: dict = {}
 event_cache_lock = asyncio.Lock()
+event_generation = 0
+
+
+def invalidate_event_state():
+    global event_generation
+    event_generation += 1
+    event_cache.clear()
+    pending_report_user_ids_by_set.clear()
+    pending_report_set_id_by_user.clear()
+    pinged_ready_set_ids.clear()
+    pinged_waiting_players.clear()
+    announced_completed_phase_group_ids.clear()
+
+
+def is_current_event(active_event: dict) -> bool:
+    return config.config_store.get_active_event() == active_event
 
 
 class SetsInfoView(discord.ui.View):
@@ -605,22 +621,28 @@ class ReportConfirmationView(discord.ui.View):
         await interaction.response.defer()
 
         try:
+            if not is_current_event(self.active_event):
+                raise StartGGError("The active event changed. Run the command again.")
             await config.startgg_client.report_set(
                 set_id=int(self.match["set"]["id"]),
                 winner_id=self.report["winner_entrant_id"],
                 game_data=self.report["game_data"],
             )
         except StartGGError as error:
-            release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+            release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
             await interaction.message.edit(
                 content=f"Could not report start.gg set: {error}",
                 view=self,
             )
             return
 
+        if not is_current_event(self.active_event):
+            await interaction.followup.send("Result sent for the previous event; further checks were stopped.", ephemeral=True)
+            return
+
         set_id = int(self.match["set"]["id"])
         mark_cached_set_completed(self.active_event, set_id, self.report["winner_entrant_id"])
-        release_pending_report(set_id, self.player_discord_ids)
+        release_pending_report(set_id, self.player_discord_ids, self.active_event)
         report_message = build_player_report_success_message(self.match, self.report, self.active_event)
         await interaction.message.edit(
             content=f"{report_message}\n\nLuna is checking for ready matches...",
@@ -644,7 +666,7 @@ class ReportConfirmationView(discord.ui.View):
 
         self.finished = True
         self.disable_all_items()
-        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
         await interaction.response.edit_message(
             content="Result report cancelled. Run `/report` again when both players are ready.",
             view=self,
@@ -652,7 +674,7 @@ class ReportConfirmationView(discord.ui.View):
 
     @discord.ui.button(label="Ping Admin", style=discord.ButtonStyle.secondary)
     async def admin_dq(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This report confirmation is already closed.", ephemeral=True)
             return
 
@@ -668,7 +690,7 @@ class ReportConfirmationView(discord.ui.View):
         await interaction.response.send_message("Only players in this set or Luna admins can use this button.", ephemeral=True)
 
     async def can_use_button(self, interaction: discord.Interaction) -> bool:
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This report confirmation is already closed.", ephemeral=True)
             return False
 
@@ -681,7 +703,7 @@ class ReportConfirmationView(discord.ui.View):
     async def on_timeout(self):
         self.finished = True
         self.disable_all_items()
-        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
 
 
 class DQRequestView(discord.ui.View):
@@ -701,7 +723,7 @@ class DQRequestView(discord.ui.View):
 
     @discord.ui.button(label="Ping Admin", style=discord.ButtonStyle.secondary)
     async def ping_admin(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This DQ request is already closed.", ephemeral=True)
             return
 
@@ -713,7 +735,7 @@ class DQRequestView(discord.ui.View):
 
     @discord.ui.button(label="Admin DQ", style=discord.ButtonStyle.danger)
     async def admin_dq(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This DQ request is already closed.", ephemeral=True)
             return
 
@@ -726,7 +748,7 @@ class DQRequestView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This DQ request is already closed.", ephemeral=True)
             return
 
@@ -736,7 +758,7 @@ class DQRequestView(discord.ui.View):
 
         self.finished = True
         self.disable_all_items()
-        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
         await interaction.response.edit_message(
             content="DQ request cancelled. Run `/dq` again if admin help is needed.",
             view=self,
@@ -745,7 +767,7 @@ class DQRequestView(discord.ui.View):
     async def on_timeout(self):
         self.finished = True
         self.disable_all_items()
-        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
 
 
 class DQReportModal(discord.ui.Modal):
@@ -761,6 +783,10 @@ class DQReportModal(discord.ui.Modal):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        if self.report_view.finished or not is_current_event(self.report_view.active_event):
+            await interaction.response.send_message("This DQ request is no longer active.", ephemeral=True)
+            return
+
         if not is_luna_admin_interaction(interaction):
             await interaction.response.send_message("Only Luna admins can report DQs.", ephemeral=True)
             return
@@ -780,6 +806,8 @@ class DQReportModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
 
         try:
+            if not is_current_event(self.report_view.active_event):
+                raise StartGGError("The active event changed. Run the command again.")
             await config.startgg_client.report_set(
                 set_id=int(self.report_view.match["set"]["id"]),
                 winner_id=dq_report["winner_entrant_id"],
@@ -787,13 +815,17 @@ class DQReportModal(discord.ui.Modal):
                 game_data=None,
             )
         except StartGGError as error:
-            release_pending_report(int(self.report_view.match["set"]["id"]), self.report_view.player_discord_ids)
+            release_pending_report(int(self.report_view.match["set"]["id"]), self.report_view.player_discord_ids, self.report_view.active_event)
             await interaction.followup.send(f"Could not report DQ to start.gg: {error}", ephemeral=True)
+            return
+
+        if not is_current_event(self.report_view.active_event):
+            await interaction.followup.send("Result sent for the previous event; further checks were stopped.", ephemeral=True)
             return
 
         set_id = int(self.report_view.match["set"]["id"])
         mark_cached_set_completed(self.report_view.active_event, set_id, dq_report["winner_entrant_id"])
-        release_pending_report(set_id, self.report_view.player_discord_ids)
+        release_pending_report(set_id, self.report_view.player_discord_ids, self.report_view.active_event)
         message = self.report_view.message
         if message:
             report_message = build_dq_report_success_message(
@@ -927,7 +959,9 @@ def register_pending_report(set_id: int, player_discord_ids: set[int]):
         pending_report_set_id_by_user[player_discord_id] = set_id
 
 
-def release_pending_report(set_id: int, player_discord_ids: set[int]):
+def release_pending_report(set_id: int, player_discord_ids: set[int], active_event: dict):
+    if not is_current_event(active_event):
+        return
     pending_report_user_ids_by_set.pop(set_id, None)
     for player_discord_id in player_discord_ids:
         if pending_report_set_id_by_user.get(player_discord_id) == set_id:
@@ -935,8 +969,13 @@ def release_pending_report(set_id: int, player_discord_ids: set[int]):
 
 
 async def refresh_event_cache(active_event: dict) -> list[dict]:
+    generation = event_generation
     async with event_cache_lock:
+        if generation != event_generation or not is_current_event(active_event):
+            raise StartGGError("The active event changed. Run the command again.")
         state = await fetch_event_state(active_event["event_id"])
+        if generation != event_generation or not is_current_event(active_event):
+            raise StartGGError("The active event changed. Run the command again.")
         event_cache.clear()
         event_cache.update(
             {
@@ -981,7 +1020,10 @@ def mark_cached_set_completed(active_event: dict, set_id: int, winner_id: int):
 
 
 async def announce_ready_matches(channel, active_event: dict, reping: bool = False) -> int:
+    generation = event_generation
     event_matches = await find_reportable_sets_for_event(active_event["event_id"])
+    if generation != event_generation or not is_current_event(active_event):
+        return 0
     return await announce_ready_matches_for_matches(channel, event_matches, reping=reping)
 
 
@@ -994,6 +1036,7 @@ async def announce_ready_matches_from_cache(channel, active_event: dict, reping:
 
 
 async def announce_ready_matches_for_matches(channel, event_matches: list[dict], reping: bool = False) -> int:
+    generation = event_generation
     ready_matches = find_ready_matches_for_ping(event_matches)
     new_ready_matches = [
         match for match in ready_matches
@@ -1008,6 +1051,8 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
+        if generation != event_generation:
+            return 0
         pinged_ready_set_ids.add(set_id)
 
     waiting_players = find_waiting_players_for_ping(event_matches, ready_matches)
@@ -1022,6 +1067,8 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
+        if generation != event_generation:
+            return 0
         pinged_waiting_players.add(waiting_player_key(waiting_player))
 
     return len(new_ready_matches)
@@ -1035,6 +1082,9 @@ async def update_ready_match_check_message(
     report: dict,
     report_message: str,
 ):
+    generation = event_generation
+    if not is_current_event(active_event):
+        return
     try:
         await refresh_event_cache(active_event)
         pinged_count = await announce_ready_matches_from_cache(channel, active_event)
@@ -1044,10 +1094,16 @@ async def update_ready_match_check_message(
         )
         return
 
+    if generation != event_generation or not is_current_event(active_event):
+        return
+
     try:
         completion_announcement = await get_completion_announcement(match, report)
     except StartGGError:
         completion_announcement = None
+
+    if generation != event_generation or not is_current_event(active_event):
+        return
 
     if completion_announcement:
         await channel.send(completion_announcement)
@@ -1062,6 +1118,7 @@ async def update_ready_match_check_message(
 
 
 async def get_completion_announcement(match: dict, report: dict) -> str | None:
+    generation = event_generation
     phase = match["phase"]
     phase_group = match["phase_group"]
     set_data = match["set"]
@@ -1078,7 +1135,7 @@ async def get_completion_announcement(match: dict, report: dict) -> str | None:
             phase_id=int(phase["id"]),
             phase_group_id=phase_group_id,
         )
-        if not completed:
+        if not completed or generation != event_generation:
             return None
 
         announced_completed_phase_group_ids.add(phase_group_id)
@@ -1097,7 +1154,7 @@ async def get_completion_announcement(match: dict, report: dict) -> str | None:
             winner_entrant_id=report["winner_entrant_id"],
         )
 
-    if not tournament_finished:
+    if not tournament_finished or generation != event_generation:
         return None
 
     announced_completed_phase_group_ids.add(phase_group_id)

@@ -47,6 +47,8 @@ class AdminPanelView(discord.ui.View):
             return
 
         deleted = config.config_store.clear_active_event()
+        from cogs.startgg import invalidate_event_state
+        invalidate_event_state()
         await refresh_admin_panel(interaction)
         if deleted:
             await interaction.followup.send(
@@ -628,6 +630,8 @@ class SetEventModal(discord.ui.Modal):
             event_name=event["name"],
             pgrs_competition_id=pgrs_competition_id,
         )
+        from cogs.startgg import invalidate_event_state
+        invalidate_event_state()
         try:
             sync_result = await sync_participant_role(interaction.guild)
         except (StartGGError, PGRSError) as error:

@@ -608,6 +608,9 @@ class SetEventModal(discord.ui.Modal):
                 max_length=200,
             )
         )
+        # py-cord 2.7.2 loses required=False in the InputText constructor.
+        self.children[-1].required = False
+
 
     async def callback(self, interaction: discord.Interaction):
         tournament_slug = self.children[0].value

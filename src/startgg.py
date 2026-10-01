@@ -19,15 +19,19 @@ class StartGGClient:
         }
         payload = {"query": query, "variables": variables or {}}
 
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.post(STARTGG_API_URL, json=payload) as response:
-                data = await response.json(content_type=None)
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(STARTGG_API_URL, json=payload) as response:
+                    response.raise_for_status()
+                    data = await response.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as error:
+            raise StartGGError("Could not read a valid response from start.gg") from error
 
-        if "errors" in data:
-            message = data["errors"][0].get("message", "Unknown start.gg error")
-            raise StartGGError(message)
-
-        if "data" not in data:
+        if not isinstance(data, dict):
+            raise StartGGError("start.gg returned an unexpected response")
+        if data.get("errors"):
+            raise StartGGError("start.gg returned GraphQL errors: " + str(data["errors"]))
+        if not isinstance(data.get("data"), dict):
             raise StartGGError("start.gg returned an unexpected response")
 
         return data["data"]
@@ -162,7 +166,9 @@ class StartGGClient:
             {"eventId": event_id},
         )
         event = data.get("event")
-        return event.get("phases", []) if event else []
+        if not isinstance(event, dict) or not isinstance(event.get("phases"), list):
+            raise StartGGError("start.gg did not return phases for the requested event")
+        return event["phases"]
 
     async def get_phase_groups(self, phase_id: int) -> list[dict]:
         results = []
@@ -192,12 +198,12 @@ class StartGGClient:
                 {"phaseId": phase_id, "page": page},
             )
             parent = data.get("phase")
-            if parent is None:
-                if page == 1:
-                    return []
-                raise StartGGError("start.gg stopped returning phase during pagination")
+            if not isinstance(parent, dict):
+                raise StartGGError("start.gg did not return the requested phase")
 
-            connection = parent.get("phaseGroups") or {}
+            connection = parent.get("phaseGroups")
+            if not isinstance(connection, dict):
+                raise StartGGError("start.gg did not return phaseGroups for the requested phase")
             total_pages = (connection.get("pageInfo") or {}).get("totalPages")
             nodes = connection.get("nodes")
             if not isinstance(total_pages, int) or total_pages < 0 or not isinstance(nodes, list):
@@ -259,12 +265,12 @@ class StartGGClient:
                 {"phaseGroupId": phase_group_id, "page": page},
             )
             parent = data.get("phaseGroup")
-            if parent is None:
-                if page == 1:
-                    return []
-                raise StartGGError("start.gg stopped returning phaseGroup during pagination")
+            if not isinstance(parent, dict):
+                raise StartGGError("start.gg did not return the requested phaseGroup")
 
-            connection = parent.get("sets") or {}
+            connection = parent.get("sets")
+            if not isinstance(connection, dict):
+                raise StartGGError("start.gg did not return sets for the requested phaseGroup")
             total_pages = (connection.get("pageInfo") or {}).get("totalPages")
             nodes = connection.get("nodes")
             if not isinstance(total_pages, int) or total_pages < 0 or not isinstance(nodes, list):

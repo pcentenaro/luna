@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import config
 import discord
 from datetime import datetime
@@ -14,6 +15,18 @@ class Startgg(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        active_event = config.config_store.get_active_event()
+        if active_event is None or config.startgg_client is None:
+            return
+        if event_cache.get("event_id") == active_event["event_id"]:
+            return
+        try:
+            await refresh_event_cache(active_event)
+        except StartGGError as error:
+            logging.getLogger(__name__).warning("Could not load the active event on startup: %s", error)
 
     startgg = discord.SlashCommandGroup("startgg")
 

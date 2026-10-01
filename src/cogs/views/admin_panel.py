@@ -630,8 +630,14 @@ class SetEventModal(discord.ui.Modal):
             event_name=event["name"],
             pgrs_competition_id=pgrs_competition_id,
         )
-        from cogs.startgg import invalidate_event_state
+        from cogs.startgg import invalidate_event_state, refresh_event_cache
         invalidate_event_state()
+        try:
+            await refresh_event_cache(config.config_store.get_active_event())
+        except StartGGError as error:
+            cache_message = f" Event data could not be loaded: {error}. Use `/refresh_event` to retry."
+        else:
+            cache_message = " Event data loaded."
         try:
             sync_result = await sync_participant_role(interaction.guild)
         except (StartGGError, PGRSError) as error:
@@ -647,7 +653,7 @@ class SetEventModal(discord.ui.Modal):
         await refresh_admin_panel(interaction)
         await interaction.followup.send(
             f"Active event set to {event['name']} (`{full_event_slug}`).{pgrs_message}"
-            f"{format_role_sync_result(sync_result)}{sync_error}",
+            f"{format_role_sync_result(sync_result)}{sync_error}{cache_message}",
             ephemeral=True,
         )
 

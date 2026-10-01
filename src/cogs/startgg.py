@@ -489,13 +489,14 @@ pinged_ready_set_ids: set[int] = set()
 pinged_waiting_players: set[tuple[int, int]] = set()
 announced_completed_phase_group_ids: set[int] = set()
 event_cache: dict = {}
-event_cache_lock = asyncio.Lock()
+event_refresh_task: asyncio.Task | None = None
 event_generation = 0
 
 
 def invalidate_event_state():
-    global event_generation
+    global event_generation, event_refresh_task
     event_generation += 1
+    event_refresh_task = None
     event_cache.clear()
     pending_report_user_ids_by_set.clear()
     pending_report_set_id_by_user.clear()
@@ -969,23 +970,36 @@ def release_pending_report(set_id: int, player_discord_ids: set[int], active_eve
 
 
 async def refresh_event_cache(active_event: dict) -> list[dict]:
+    global event_refresh_task
     generation = event_generation
-    async with event_cache_lock:
-        if generation != event_generation or not is_current_event(active_event):
-            raise StartGGError("The active event changed. Run the command again.")
-        state = await fetch_event_state(active_event["event_id"])
-        if generation != event_generation or not is_current_event(active_event):
-            raise StartGGError("The active event changed. Run the command again.")
-        event_cache.clear()
-        event_cache.update(
-            {
-                "event_id": active_event["event_id"],
-                "event_name": active_event["event_name"],
-                **state,
-                "updated_at": datetime.now(timezone.utc),
-            }
-        )
-        return get_cached_reportable_matches(active_event)
+    if not is_current_event(active_event):
+        raise StartGGError("The active event changed. Run the command again.")
+    if event_refresh_task is None or event_refresh_task.done():
+        event_refresh_task = asyncio.create_task(_refresh_event_cache(active_event, generation))
+        # Retrieve failures even if every caller stops waiting for the shared task.
+        event_refresh_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+    matches = await asyncio.shield(event_refresh_task)
+    if generation != event_generation or not is_current_event(active_event):
+        raise StartGGError("The active event changed. Run the command again.")
+    return matches
+
+
+async def _refresh_event_cache(active_event: dict, generation: int) -> list[dict]:
+    if generation != event_generation or not is_current_event(active_event):
+        raise StartGGError("The active event changed. Run the command again.")
+    state = await fetch_event_state(active_event["event_id"])
+    if generation != event_generation or not is_current_event(active_event):
+        raise StartGGError("The active event changed. Run the command again.")
+    event_cache.clear()
+    event_cache.update(
+        {
+            "event_id": active_event["event_id"],
+            "event_name": active_event["event_name"],
+            **state,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    return get_cached_reportable_matches(active_event)
 
 
 def get_cached_reportable_matches(active_event: dict) -> list[dict] | None:

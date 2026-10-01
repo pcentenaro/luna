@@ -491,11 +491,13 @@ announced_completed_phase_group_ids: set[int] = set()
 event_cache: dict = {}
 event_refresh_task: asyncio.Task | None = None
 event_generation = 0
+event_results_revision = 0
 
 
 def invalidate_event_state():
-    global event_generation, event_refresh_task
+    global event_generation, event_refresh_task, event_results_revision
     event_generation += 1
+    event_results_revision = 0
     event_refresh_task = None
     event_cache.clear()
     pending_report_user_ids_by_set.clear()
@@ -985,11 +987,16 @@ async def refresh_event_cache(active_event: dict) -> list[dict]:
 
 
 async def _refresh_event_cache(active_event: dict, generation: int) -> list[dict]:
-    if generation != event_generation or not is_current_event(active_event):
-        raise StartGGError("The active event changed. Run the command again.")
-    state = await fetch_event_state(active_event["event_id"])
-    if generation != event_generation or not is_current_event(active_event):
-        raise StartGGError("The active event changed. Run the command again.")
+    while True:
+        if generation != event_generation or not is_current_event(active_event):
+            raise StartGGError("The active event changed. Run the command again.")
+        revision = event_results_revision
+        state = await fetch_event_state(active_event["event_id"])
+        if generation != event_generation or not is_current_event(active_event):
+            raise StartGGError("The active event changed. Run the command again.")
+        if revision == event_results_revision:
+            break
+        # A result was confirmed during the download; fetch a newer snapshot.
     event_cache.clear()
     event_cache.update(
         {
@@ -1024,9 +1031,11 @@ def get_cached_reportable_sets_for_player(active_event: dict, player_id: int) ->
 
 
 def mark_cached_set_completed(active_event: dict, set_id: int, winner_id: int):
-    if event_cache.get("event_id") != active_event["event_id"]:
+    global event_results_revision
+    if not is_current_event(active_event) or event_cache.get("event_id") != active_event["event_id"]:
         return
 
+    event_results_revision += 1
     for match in event_cache.get("matches") or []:
         if str(match["set"].get("id")) == str(set_id):
             match["set"] = {**match["set"], "state": 3, "winnerId": winner_id}

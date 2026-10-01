@@ -189,37 +189,25 @@ class Startgg(commands.Cog):
             default=None,
         ),
     ):
-        if config.startgg_client is None:
-            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
-            return
-
-        if phase:
-            phase = phase.strip()
-            await ctx.defer(ephemeral=True)
-
-            if phase.isdigit():
-                await respond_with_phase_group_sets(ctx, int(phase))
-                return
-
-            active_event = config.config_store.get_active_event()
-            if active_event is None:
-                await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
-                return
-
-            await respond_with_phase_sets(ctx, active_event, phase)
-            return
-
         active_event = config.config_store.get_active_event()
         if active_event is None:
             await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
             return
-        link = config.link_store.get_startgg_link(ctx.author.id)
-        await ctx.defer(ephemeral=True)
-        try:
-            event_matches = await find_sets_for_event(active_event["event_id"])
-        except StartGGError as error:
-            await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
+        cached_event = event_cache.copy()
+        if cached_event.get("event_id") != active_event["event_id"]:
+            await ctx.respond("Event cache is not ready. Ask a Luna admin to use `/refresh_event` first.", ephemeral=True)
             return
+        await ctx.defer(ephemeral=True)
+        if phase:
+            phase = phase.strip()
+            if phase.isdigit():
+                await respond_with_phase_group_sets(ctx, int(phase), cached_event)
+            else:
+                await respond_with_phase_sets(ctx, active_event, phase, cached_event)
+            return
+
+        link = config.link_store.get_startgg_link(ctx.author.id)
+        event_matches = list(cached_event["matches"])
 
         player_matches = []
         if link is not None:
@@ -1496,10 +1484,6 @@ async def fetch_event_state(event_id: int) -> dict:
     return {"phases": phases, "phase_groups": phase_groups, "matches": sort_set_matches(matches)}
 
 
-async def find_sets_for_event(event_id: int) -> list[dict]:
-    return (await fetch_event_state(event_id))["matches"]
-
-
 def is_active_phase_group(phase_group: dict) -> bool:
     return str(phase_group.get("state")).casefold() in {"2", "active"}
 
@@ -1888,12 +1872,11 @@ def format_slot_name_with_score(slot: dict) -> str:
     return f"{entrant.get('name') or 'Unnamed'}{score_text}"
 
 
-async def respond_with_phase_group_sets(ctx: discord.ApplicationContext, phase_group_id: int):
-    try:
-        sets = await config.startgg_client.get_phase_group_sets(phase_group_id)
-    except StartGGError as error:
-        await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
-        return
+async def respond_with_phase_group_sets(ctx: discord.ApplicationContext, phase_group_id: int, cached_event: dict):
+    sets = [
+        match["set"] for match in cached_event["matches"]
+        if str(match["phase_group"]["id"]) == str(phase_group_id)
+    ]
 
     if not sets:
         await ctx.respond(f"No sets found for phase group ID {phase_group_id}.", ephemeral=True)
@@ -1906,12 +1889,8 @@ async def respond_with_phase_group_sets(ctx: discord.ApplicationContext, phase_g
     )
 
 
-async def respond_with_phase_sets(ctx: discord.ApplicationContext, active_event: dict, phase_name: str):
-    try:
-        phases = await config.startgg_client.get_event_phases(active_event["event_id"])
-    except StartGGError as error:
-        await ctx.respond(f"Could not read start.gg phases: {error}", ephemeral=True)
-        return
+async def respond_with_phase_sets(ctx: discord.ApplicationContext, active_event: dict, phase_name: str, cached_event: dict):
+    phases = cached_event["phases"]
 
     matching_phases = find_phases_by_name(phases, phase_name)
     if not matching_phases:
@@ -1923,25 +1902,12 @@ async def respond_with_phase_sets(ctx: discord.ApplicationContext, active_event:
         )
         return
 
-    set_lines = []
-    for phase in matching_phases:
-        try:
-            phase_groups = await config.startgg_client.get_phase_groups(int(phase["id"]))
-        except StartGGError as error:
-            await ctx.respond(f"Could not read start.gg phase groups: {error}", ephemeral=True)
-            return
-
-        for phase_group in phase_groups:
-            try:
-                sets = await config.startgg_client.get_phase_group_sets(int(phase_group["id"]))
-            except StartGGError as error:
-                await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
-                return
-
-            set_lines.extend(
-                format_phase_set_summary(phase, phase_group, set_data)
-                for set_data in sets
-            )
+    phase_ids = {str(phase["id"]) for phase in matching_phases}
+    set_lines = [
+        format_phase_set_summary(match["phase"], match["phase_group"], match["set"])
+        for match in cached_event["matches"]
+        if str(match["phase"]["id"]) in phase_ids
+    ]
 
     if not set_lines:
         await ctx.respond(f"No sets found for phase `{phase_name}`.", ephemeral=True)

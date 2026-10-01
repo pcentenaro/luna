@@ -4,7 +4,7 @@ import config
 import discord
 from datetime import datetime
 from datetime import timezone
-from discord.ext import commands
+from discord.ext import commands, tasks
 from participant_role import sync_participant_role
 from pgrs import PGRSError
 from startgg import StartGGClient, StartGGError
@@ -18,6 +18,7 @@ class Startgg(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
+        self.configure_event_sync()
         active_event = config.config_store.get_active_event()
         if active_event is None or config.startgg_client is None:
             return
@@ -27,6 +28,30 @@ class Startgg(commands.Cog):
             await refresh_event_cache(active_event)
         except StartGGError as error:
             logging.getLogger(__name__).warning("Could not load the active event on startup: %s", error)
+
+    def configure_event_sync(self):
+        seconds = config.config_store.get_event_refresh_interval()
+        if seconds == 0:
+            self.event_sync_loop.cancel()
+            return
+        self.event_sync_loop.change_interval(seconds=seconds)
+        if not self.event_sync_loop.is_running():
+            self.event_sync_loop.start()
+        elif self.event_sync_loop.get_task().cancelling():
+            self.event_sync_loop.restart()
+
+    def cog_unload(self):
+        self.event_sync_loop.cancel()
+
+    @tasks.loop(seconds=60)
+    async def event_sync_loop(self):
+        active_event = config.config_store.get_active_event()
+        if active_event is None or config.startgg_client is None:
+            return
+        try:
+            await refresh_event_cache(active_event)
+        except StartGGError as error:
+            logging.getLogger(__name__).warning("Could not synchronize the active event: %s", error)
 
     startgg = discord.SlashCommandGroup("startgg")
 

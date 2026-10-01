@@ -80,6 +80,13 @@ class AdminPanelView(discord.ui.View):
         display_name = format_user_display_name(user)
         await interaction.followup.send(f"Connected to start.gg as {display_name}.", ephemeral=True)
 
+    @discord.ui.button(label="Event refresh", style=discord.ButtonStyle.secondary, row=0)
+    async def event_refresh(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can change event synchronization.", ephemeral=True)
+            return
+        await interaction.response.send_modal(SetEventRefreshModal())
+
     @discord.ui.button(label="Set admin role", style=discord.ButtonStyle.primary, row=1)
     async def set_admin_role(self, button: discord.ui.Button, interaction: discord.Interaction):
         if not can_configure_admin_role(interaction):
@@ -344,6 +351,12 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     embed.add_field(name="Admin role", value=admin_role_value, inline=True)
     embed.add_field(name="Participant role", value=participant_role_value, inline=True)
     embed.add_field(name="Start.gg", value=startgg_value, inline=True)
+    refresh_seconds = config.config_store.get_event_refresh_interval()
+    embed.add_field(
+        name="Event refresh",
+        value=f"Every {refresh_seconds} seconds" if refresh_seconds else "Manual only",
+        inline=True,
+    )
     embed.add_field(
         name="Score targets",
         value=(
@@ -678,6 +691,36 @@ class SetAdminRoleModal(discord.ui.Modal):
         config.config_store.set_admin_role_id(role.id)
         await refresh_admin_panel(interaction)
         await interaction.response.send_message(f"Luna admin role set to {role.mention}.", ephemeral=True)
+
+
+class SetEventRefreshModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Event synchronization")
+        self.add_item(discord.ui.InputText(
+            label="Interval in seconds (0 = disabled)",
+            value=str(config.config_store.get_event_refresh_interval()),
+            required=True,
+            max_length=8,
+        ))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can change event synchronization.", ephemeral=True)
+            return
+        try:
+            seconds = int(self.children[0].value)
+            config.config_store.set_event_refresh_interval(seconds)
+        except (ValueError, TypeError):
+            await interaction.response.send_message("Enter a whole number of seconds, or 0 to disable synchronization.", ephemeral=True)
+            return
+        cog = config.bot.get_cog("Startgg")
+        if cog is not None:
+            cog.configure_event_sync()
+        await interaction.response.send_message(
+            f"Event synchronization set to every {seconds} seconds." if seconds else "Periodic event synchronization disabled.",
+            ephemeral=True,
+        )
+        await refresh_admin_panel(interaction)
 
 
 class SetScoreTargetsModal(discord.ui.Modal):

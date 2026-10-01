@@ -343,6 +343,16 @@ class ConfigStore:
         self._save(data)
         return True
 
+    def get_event_refresh_interval(self) -> int:
+        return int(self._load().get("event_refresh_interval_seconds", 0))
+
+    def set_event_refresh_interval(self, seconds: int):
+        if type(seconds) is not int or seconds < 0:
+            raise ValueError("The refresh interval must be a non-negative integer")
+        data = self._load()
+        data["event_refresh_interval_seconds"] = seconds
+        self._save(data)
+
     def get_score_targets(self) -> dict:
         score_targets = self._load().get("score_targets") or {}
         return {

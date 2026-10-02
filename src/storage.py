@@ -359,6 +359,17 @@ class ConfigStore:
         self._save(data)
         return True
 
+    def get_completed_group_announcements(self, event_id: int) -> set[int]:
+        return set(self._load().get("completed_group_announcements", {}).get(str(event_id), []))
+
+    def set_completed_group_announcements(self, event_id: int, group_ids: set[int]):
+        data = self._load()
+        history = data.setdefault("completed_group_announcements", {})
+        if set(history.get(str(event_id), [])) == group_ids:
+            return
+        history[str(event_id)] = sorted(group_ids)
+        self._save(data)
+
     def get_event_refresh_interval(self) -> int:
         return int(self._load().get("event_refresh_interval_seconds", 0))
 

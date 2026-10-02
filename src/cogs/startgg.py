@@ -445,7 +445,11 @@ class Startgg(commands.Cog):
             return
 
         await ctx.defer(ephemeral=True)
-        pinged_count = await announce_ready_matches_from_cache(ctx.channel, active_event, reping=reping)
+        try:
+            pinged_count = await announce_ready_matches_from_cache(ctx.channel, active_event, reping=reping)
+        except (StartGGError, discord.HTTPException) as error:
+            await ctx.respond(f"Could not announce ready matches: {error}", ephemeral=True)
+            return
         if pinged_count is None:
             await ctx.respond("Event cache is not ready. Use `/refresh_event` first.", ephemeral=True)
             return
@@ -487,7 +491,7 @@ class Startgg(commands.Cog):
         try:
             pinged_count = await announce_ready_matches_from_cache(ctx.channel, active_event, reopened_only=True)
             completed_count = await announce_completed_phase_groups_from_cache(ctx.channel, active_event)
-        except discord.HTTPException as error:
+        except (StartGGError, discord.HTTPException) as error:
             await ctx.respond(f"Event data refreshed, but event announcements failed: {error}. Retry `/refresh_event`.", ephemeral=True)
             return
         if pinged_count is None or completed_count is None:
@@ -535,6 +539,7 @@ pending_report_user_ids_by_set: dict[int, set[int]] = {}
 pending_report_set_id_by_user: dict[int, int] = {}
 pinged_ready_set_ids: set[int] = set()
 reopened_set_ids: set[int] = set()
+# ponytail: one lock coordinates sends and cache publication; split by event if multiple events become active.
 match_announcement_lock = asyncio.Lock()
 pinged_waiting_players: set[tuple[int, int]] = set()
 announced_completed_phase_group_ids: set[int] = set()
@@ -1044,40 +1049,56 @@ async def _refresh_event_cache(active_event: dict, generation: int) -> list[dict
         state = await fetch_event_state(active_event["event_id"])
         if generation != event_generation or not is_current_event(active_event):
             raise StartGGError("The active event changed. Run the command again.")
-        if revision == event_results_revision:
-            break
-        # A result was confirmed during the download; fetch a newer snapshot.
-    previous_sets = {
-        str(match["set"]["id"]): match["set"]
-        for match in event_cache.get("matches", [])
-    } if event_cache.get("event_id") == active_event["event_id"] else {}
-    reopened = {
-        int(match["set"]["id"])
-        for match in state["matches"]
-        if is_real_set_id(match["set"])
-        and is_pending_set(match["set"])
-        and (previous := previous_sets.get(str(match["set"]["id"]))) is not None
-        and not is_pending_set(previous)
-    }
-    reopened_set_ids.update(reopened)
-    reopened_set_ids.intersection_update(
-        int(match["set"]["id"]) for match in state["matches"]
-        if is_real_set_id(match["set"]) and is_pending_set(match["set"])
-    )
-    pinged_ready_set_ids.difference_update(reopened)
-    pinged_waiting_players.difference_update({
-        key for key in pinged_waiting_players if key[1] in reopened
-    })
-    event_cache.clear()
-    event_cache.update(
-        {
-            "event_id": active_event["event_id"],
-            "event_name": active_event["event_name"],
-            **state,
-            "updated_at": datetime.now(timezone.utc),
-        }
-    )
-    return get_cached_reportable_matches(active_event)
+        # Recheck results after waiting for any in-flight announcement.
+        async with match_announcement_lock:
+            if generation != event_generation or not is_current_event(active_event):
+                raise StartGGError("The active event changed. Run the command again.")
+            if revision != event_results_revision:
+                continue
+            try:
+                announced = config.config_store.get_completed_group_announcements(active_event["event_id"])
+                reopened_groups = {
+                    int(group["id"])
+                    for groups in state["phase_groups"].values() for group in groups
+                    if str(group.get("state")).casefold() in {"1", "2", "4", "created", "active", "ready"}
+                }
+                announced.difference_update(reopened_groups)
+                config.config_store.set_completed_group_announcements(active_event["event_id"], announced)
+            except (OSError, ValueError) as error:
+                raise StartGGError(f"Could not save completion announcement history: {error}") from error
+            announced_completed_phase_group_ids.clear()
+            announced_completed_phase_group_ids.update(announced)
+            previous_sets = {
+                str(match["set"]["id"]): match["set"]
+                for match in event_cache.get("matches", [])
+            } if event_cache.get("event_id") == active_event["event_id"] else {}
+            reopened = {
+                int(match["set"]["id"])
+                for match in state["matches"]
+                if is_real_set_id(match["set"])
+                and is_pending_set(match["set"])
+                and (previous := previous_sets.get(str(match["set"]["id"]))) is not None
+                and not is_pending_set(previous)
+            }
+            reopened_set_ids.update(reopened)
+            reopened_set_ids.intersection_update(
+                int(match["set"]["id"]) for match in state["matches"]
+                if is_real_set_id(match["set"]) and is_pending_set(match["set"])
+            )
+            pinged_ready_set_ids.difference_update(reopened)
+            pinged_waiting_players.difference_update({
+                key for key in pinged_waiting_players if key[1] in reopened
+            })
+            event_cache.clear()
+            event_cache.update(
+                {
+                    "event_id": active_event["event_id"],
+                    "event_name": active_event["event_name"],
+                    **state,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
+        return get_cached_reportable_matches(active_event)
 
 
 def get_cached_reportable_matches(active_event: dict) -> list[dict] | None:
@@ -1113,6 +1134,22 @@ def mark_cached_set_completed(active_event: dict, set_id: int, winner_id: int):
             return
 
 
+def get_event_announcement_channel(channel):
+    guild = getattr(channel, "guild", None)
+    if guild is None:
+        return channel
+    channel_id = config.config_store.get_event_announcement_channel_id(guild.id)
+    if channel_id is None:
+        return channel
+    destination = guild.get_channel(channel_id)
+    if destination is None:
+        raise StartGGError("The event announcement channel is missing. Update Channel settings in the admin panel.")
+    permissions = destination.permissions_for(guild.me) if guild.me else None
+    if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
+        raise StartGGError("Luna needs View Channel, Send Messages and Embed Links in the event announcement channel.")
+    return destination
+
+
 async def announce_ready_matches(channel, active_event: dict, reping: bool = False) -> int:
     generation = event_generation
     event_matches = await find_reportable_sets_for_event(active_event["event_id"])
@@ -1136,6 +1173,7 @@ async def announce_ready_matches_from_cache(channel, active_event: dict, reping:
 
 
 async def announce_ready_matches_for_matches(channel, event_matches: list[dict], reping: bool = False, only_set_ids: set[int] | None = None) -> int:
+    channel = get_event_announcement_channel(channel)
     generation = event_generation
     ready_matches = find_ready_matches_for_ping(event_matches)
     new_ready_matches = [
@@ -1189,7 +1227,7 @@ async def update_ready_match_check_message(
     try:
         await refresh_event_cache(active_event)
         pinged_count = await announce_ready_matches_from_cache(channel, active_event)
-    except StartGGError as error:
+    except (StartGGError, discord.HTTPException) as error:
         await message.edit(
             content=f"{report_message}\n\nScore reported, but Luna could not check ready matches: {error}"
         )
@@ -1200,7 +1238,7 @@ async def update_ready_match_check_message(
 
     try:
         await announce_completed_phase_groups_from_cache(channel, active_event)
-    except discord.HTTPException as error:
+    except (StartGGError, discord.HTTPException) as error:
         await message.edit(
             content=f"{report_message}\n\nCompletion announcements failed: {error}. Retry `/refresh_event`."
         )
@@ -1219,6 +1257,7 @@ async def update_ready_match_check_message(
 
 
 async def announce_completed_phase_groups_from_cache(channel, active_event: dict) -> int | None:
+    channel = get_event_announcement_channel(channel)
     generation = event_generation
     async with match_announcement_lock:
         if generation != event_generation or not is_current_event(active_event):
@@ -1230,13 +1269,7 @@ async def announce_completed_phase_groups_from_cache(channel, active_event: dict
             for group in event_cache.get("phase_groups", {}).get(int(phase["id"]), []):
                 if generation != event_generation or not is_current_event(active_event):
                     return None
-                # A refresh may replace the snapshot while Discord is sending a notice.
-                current_group = next((
-                    current for current in event_cache.get("phase_groups", {}).get(int(phase["id"]), [])
-                    if current["id"] == group["id"]
-                ), None)
-                if current_group is None:
-                    continue
+                current_group = group
                 group_id = int(current_group["id"])
                 if group_id in announced_completed_phase_group_ids:
                     continue
@@ -1246,6 +1279,12 @@ async def announce_completed_phase_groups_from_cache(channel, active_event: dict
                 await channel.send(announcement)
                 if generation != event_generation or not is_current_event(active_event):
                     return None
+                try:
+                    config.config_store.set_completed_group_announcements(
+                        active_event["event_id"], announced_completed_phase_group_ids | {group_id}
+                    )
+                except (OSError, ValueError) as error:
+                    raise StartGGError(f"Notice sent, but its history could not be saved: {error}") from error
                 announced_completed_phase_group_ids.add(group_id)
                 count += 1
         return count

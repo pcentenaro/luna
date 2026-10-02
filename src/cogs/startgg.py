@@ -52,6 +52,23 @@ class Startgg(commands.Cog):
             await refresh_event_cache(active_event)
         except StartGGError as error:
             logging.getLogger(__name__).warning("Could not synchronize the active event: %s", error)
+            return
+
+        for guild_id, channel_id in config.config_store.get_event_announcement_channels().items():
+            if not is_current_event(active_event):
+                return
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                logging.getLogger(__name__).warning("Event announcement channel %s is missing in guild %s", channel_id, guild_id)
+                continue
+            for announce in (announce_ready_matches_from_cache, announce_completed_phase_groups_from_cache):
+                try:
+                    await announce(channel, active_event)
+                except (StartGGError, discord.HTTPException) as error:
+                    logging.getLogger(__name__).warning("Could not publish event announcements in channel %s: %s", channel_id, error)
 
     startgg = discord.SlashCommandGroup("startgg")
 

@@ -347,6 +347,12 @@ class ConfigStore:
         channel_id = self._load().get("event_announcement_channels", {}).get(str(guild_id))
         return int(channel_id) if channel_id else None
 
+    def get_event_announcement_channels(self) -> dict[int, int]:
+        return {
+            int(guild_id): int(channel_id)
+            for guild_id, channel_id in self._load().get("event_announcement_channels", {}).items()
+        }
+
     def set_event_announcement_channel_id(self, guild_id: int, channel_id: int):
         data = self._load()
         data.setdefault("event_announcement_channels", {})[str(guild_id)] = str(channel_id)

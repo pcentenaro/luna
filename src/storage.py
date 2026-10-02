@@ -343,6 +343,22 @@ class ConfigStore:
         self._save(data)
         return True
 
+    def get_event_announcement_channel_id(self, guild_id: int) -> int | None:
+        channel_id = self._load().get("event_announcement_channels", {}).get(str(guild_id))
+        return int(channel_id) if channel_id else None
+
+    def set_event_announcement_channel_id(self, guild_id: int, channel_id: int):
+        data = self._load()
+        data.setdefault("event_announcement_channels", {})[str(guild_id)] = str(channel_id)
+        self._save(data)
+
+    def clear_event_announcement_channel_id(self, guild_id: int) -> bool:
+        data = self._load()
+        if data.get("event_announcement_channels", {}).pop(str(guild_id), None) is None:
+            return False
+        self._save(data)
+        return True
+
     def get_event_refresh_interval(self) -> int:
         return int(self._load().get("event_refresh_interval_seconds", 0))
 

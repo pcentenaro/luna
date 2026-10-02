@@ -198,6 +198,7 @@ class ChannelSettingsView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
         self.add_item(LeaderboardChannelSelect())
+        self.add_item(EventAnnouncementChannelSelect())
 
     @discord.ui.button(label="Clear ranking channel", style=discord.ButtonStyle.danger, row=1)
     async def clear_clues_ranking_channel(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -211,6 +212,20 @@ class ChannelSettingsView(discord.ui.View):
         deleted = config.clues_store.clear_leaderboard_channel_id(interaction.guild.id)
         await refresh_channel_settings_response(interaction)
         message = "Guess the Clues ranking channel cleared." if deleted else "No ranking channel was configured."
+        await interaction.followup.send(message, ephemeral=True)
+
+
+    @discord.ui.button(label="Clear event channel", style=discord.ButtonStyle.danger, row=3)
+    async def clear_event_channel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can clear the event channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+        deleted = config.config_store.clear_event_announcement_channel_id(interaction.guild.id)
+        await refresh_channel_settings_response(interaction)
+        message = "Event announcement channel cleared." if deleted else "No event channel was configured."
         await interaction.followup.send(message, ephemeral=True)
 
 
@@ -297,6 +312,33 @@ class LeaderboardChannelSelect(discord.ui.Select):
         await interaction.followup.send(f"Guess the Clues rankings will be posted in {channel.mention}.", ephemeral=True)
 
 
+class EventAnnouncementChannelSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            select_type=discord.ComponentType.channel_select,
+            custom_id="admin:event_announcement_channel",
+            placeholder="Choose the event announcement channel",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the event channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+        channel = self.values[0]
+        permissions = channel.permissions_for(interaction.guild.me) if interaction.guild.me else None
+        if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
+            await interaction.response.send_message("Luna needs View Channel, Send Messages and Embed Links in that channel.", ephemeral=True)
+            return
+        config.config_store.set_event_announcement_channel_id(interaction.guild.id, channel.id)
+        await refresh_channel_settings_response(interaction)
+        await interaction.followup.send(f"Event announcements will be posted in {channel.mention}.", ephemeral=True)
+
+
 def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
     leaderboard_channel_id = config.clues_store.get_leaderboard_channel_id(guild.id)
     leaderboard_channel_value = "Not configured"
@@ -310,6 +352,12 @@ def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
         color=discord.Color.gold(),
     )
     embed.add_field(name="Guess the Clues ranking", value=leaderboard_channel_value)
+    event_channel_id = config.config_store.get_event_announcement_channel_id(guild.id)
+    event_channel = guild.get_channel(event_channel_id) if event_channel_id else None
+    event_channel_value = event_channel.mention if event_channel else (
+        f"Missing channel ID `{event_channel_id}`" if event_channel_id else "Not configured (uses the command channel)"
+    )
+    embed.add_field(name="Event announcements", value=event_channel_value)
     return embed
 
 

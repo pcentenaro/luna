@@ -682,7 +682,7 @@ class ReportConfirmationView(discord.ui.View):
         self.confirmed_user_names[interaction.user.id] = interaction.user.display_name
         if self.confirmed_user_ids != self.player_discord_ids:
             await interaction.response.edit_message(
-                content=build_player_report_confirmation_message(
+                content=f"{format_user_mentions(self.player_discord_ids)}\n"+build_player_report_confirmation_message(
                     self.match,
                     self.report,
                     confirmed_count=len(self.confirmed_user_ids),

@@ -1,0 +1,48 @@
+<svg width="1920" height="1080" xmlns="http://www.w3.org/2000/svg">    
+    <defs>
+        <style>
+            @import url('https://googleapis.com');
+            
+            .bebas-stroked {
+                /* 2. Apply font family name exactly as Google specifies */
+                font-family: 'Bebas Neue', sans-serif;
+                font-size: 72px; /* Bebas is narrow, so you can bump up the size! */
+                fill: white;
+                stroke: black;
+                stroke-width: 10px;
+                paint-order: stroke fill;
+                font-weight: 800;
+            }
+
+            .bebas-stroked-small {
+                /* 2. Apply font family name exactly as Google specifies */
+                font-family: 'Bebas Neue', sans-serif;
+                font-size: 54px; /* Bebas is narrow, so you can bump up the size! */
+                fill: white;
+                stroke: black;
+                stroke-width: 10px;
+                paint-order: stroke fill;
+                font-weight: 800;
+            }
+        </style>
+    </defs>
+    <style><![CDATA[svg text{stroke:none}]]></style>
+
+    
+    <image href="$background_file" x="0" y="0" width="1920" height="1080"></image>
+    <clipPath id="clipCircle">
+        <circle r="100" cx="1344" cy="378"/>
+    </clipPath>
+    <image href="$first_file" x="1216" y="250" width="256" height="256" clip-path="url(#clipCircle)"></image>
+    <clipPath id="clipCircle2">
+        <circle r="100" cx="1344" cy="649"/>
+    </clipPath>
+    <image href="$second_file" x="1216" y="521" width="256" height="256" clip-path="url(#clipCircle2)"></image>
+    <clipPath id="clipCircle3">
+        <circle r="100" cx="1344" cy="919"/>
+    </clipPath>
+    <image href="$third_file" x="1216" y="791" width="256" height="256" clip-path="url(#clipCircle3)"></image>
+    <text x="680" y="406" class="$first_class">$first_name</text>
+    <text x="680" y="668" class="$second_class">$second_name</text>
+    <text x="680" y="946" class="$third_class">$third_name</text>
+</svg>

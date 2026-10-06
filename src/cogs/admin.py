@@ -12,6 +12,8 @@ from discord.ext import commands
 from participant_role import sync_participant_role
 from pgrs import PGRSError, fetch_pgrs_entries
 from startgg import StartGGError
+from cairosvg import svg2png
+
 
 
 class Admin(commands.Cog):

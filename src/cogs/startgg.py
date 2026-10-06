@@ -527,7 +527,7 @@ class Startgg(commands.Cog):
     @discord.slash_command(
         name="podium"
     )
-    async def refresh_event(
+    async def podium(
         self,
         ctx: discord.ApplicationContext,
         background: discord.Option(str, choices=["Red", "Blue", "Yellow", "Green"]),
@@ -536,7 +536,7 @@ class Startgg(commands.Cog):
         third: discord.Member
     ):
         if not is_luna_admin(ctx):
-            await ctx.respond("Only Luna admins can refresh event data.", ephemeral=True)
+            await ctx.respond("Only Luna admins can create podium images.", ephemeral=True)
             return
         await ctx.defer(ephemeral=True)
         Path("rsc/img/tmp").mkdir(exist_ok=True)

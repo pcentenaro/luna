@@ -8,3 +8,4 @@ data/*.db
 **/*:Zone.Identifier
 luna.log
 nohup.out
+rsc/img/tmp

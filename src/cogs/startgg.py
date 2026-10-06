@@ -1,12 +1,16 @@
 import asyncio
 import config
 import discord
+import shutil
+import subprocess
 from datetime import datetime
 from datetime import timezone
 from discord.ext import commands
 from participant_role import sync_participant_role
+from pathlib import Path
 from pgrs import PGRSError
 from startgg import StartGGClient, StartGGError
+from string import Template
 from storage import LinkStore, EventDataStore
 
 
@@ -463,6 +467,55 @@ class Startgg(commands.Cog):
             ephemeral=True,
         )
 
+    @discord.slash_command(
+        name="podium"
+    )
+    async def refresh_event(
+        self,
+        ctx: discord.ApplicationContext,
+        background: discord.Option(str, choices=["Red", "Blue", "Yellow", "Green"]),
+        first: discord.Member,
+        second: discord.Member,
+        third: discord.Member
+    ):
+        if not is_luna_admin(ctx):
+            await ctx.respond("Only Luna admins can refresh event data.", ephemeral=True)
+            return
+        await ctx.defer(ephemeral=True)
+        Path("rsc/img/tmp").mkdir(exist_ok=True)
+        await first.display_avatar.save("rsc/img/tmp/first.png")
+        await second.display_avatar.save("rsc/img/tmp/second.png")
+        await third.display_avatar.save("rsc/img/tmp/third.png")
+        shutil.copy(f"rsc/img/{background.lower()}_podium.png", "rsc/img/tmp/background.png")
+        svg_template = Template(Path("rsc/img/podium_template.svg").read_text())
+        link_store = LinkStore()
+        first_player = link_store.get_startgg_link(first.id)
+        second_player = link_store.get_startgg_link(second.id)
+        third_player = link_store.get_startgg_link(third.id)
+        if first_player is None or second_player is None or third_player is None:
+            await ctx.respond("One of the players doesn't have a linked account.", ephemeral=True)
+            return
+        first_name = first_player["startgg_gamer_tag"]
+        second_name = second_player["startgg_gamer_tag"]
+        third_name = third_player["startgg_gamer_tag"]
+        svg = svg_template.substitute(
+            {
+                "background_file": "background.png",
+                "first_file": "first.png",
+                "second_file": "second.png",
+                "third_file": "third.png",
+                "first_name": first_name,
+                "second_name": second_name,
+                "third_name": third_name,
+                "first_class": "bebas-stroked" if len(first_name) <= 12 else "bebas-stroked-small",
+                "second_class": "bebas-stroked" if len(second_name) <= 12 else "bebas-stroked-small",
+                "third_class": "bebas-stroked" if len(third_name) <= 12 else "bebas-stroked-small",
+            }
+        )
+        Path("rsc/img/tmp/podium.svg").write_text(svg)
+        subprocess.run(["rsvg-convert", "-o", "rsc/img/tmp/podium.png", "rsc/img/tmp/podium.svg"])
+        await ctx.respond(file=discord.File("rsc/img/tmp/podium.png"), ephemeral=True)
+        return
 
 def setup(bot):
     bot.add_cog(Startgg(bot))

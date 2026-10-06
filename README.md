@@ -6,8 +6,41 @@ To run the bot on Linux, you first need to install Python. To do so, run the fol
 
 ```bash
 sudo apt update
-sudo apt install python3.12
+sudo apt install python3.12 librsvg2-bin fontconfig
 ```
+
+Image generation uses SVG converted to PNG by `rsvg-convert` (provided by
+`librsvg2-bin`), also used by `/podium`. Install these system packages on the
+machine running Luna; they are not installed by `pip`.
+
+Bracket images will use **Press Start 2P**, bundled with its SIL OFL license in
+`rsc/fonts/press-start-2p/`. It has one Regular face; SVG styles should specify
+`font-family="Press Start 2P"` and `font-weight="normal"`.
+
+From the repository root, install it **as the user that runs Luna** (repeat on
+production under the service account):
+
+```bash
+mkdir -p ~/.local/share/fonts/luna
+cp rsc/fonts/press-start-2p/PressStart2P-Regular.ttf ~/.local/share/fonts/luna/
+fc-cache -f ~/.local/share/fonts/luna
+fc-match "Press Start 2P"
+```
+
+The match must report Press Start 2P, not a substitute. This font does not cover
+all Unicode characters; unsupported player names need a separate fallback.
+The podium's existing **Bebas Neue** styling is separate and still needs that
+font installed to render as designed.
+
+To verify SVG conversion and the bracket fonts without starting the bot:
+
+```bash
+venv/bin/python -m unittest discover -s src -p test_svg_environment.py -v
+```
+
+Pillow is not required for SVG rendering. If installed for the earlier bracket
+prototype, it can be removed from Luna's virtual environment with
+`venv/bin/python -m pip uninstall Pillow`.
 
 With Python installed, go to the root directory of the repository and run
 

@@ -5,8 +5,30 @@ from textwrap import wrap
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 
+MATCH_CARD_WIDTH = 360
+MATCH_CARD_HEIGHT = 128
+ROUND_GAP = 56
+MATCH_GAP = 32
+
+
+def _winners_rounds(sets: list[dict]) -> list[tuple[int, list[dict]]]:
+    rounds = {}
+    for match in sets:
+        number = match.get("round")
+        if number is None:
+            continue
+        number = int(number)
+        label = " ".join(str(match.get("fullRoundText") or "").casefold().split())
+        if number <= 0 or "grand final" in label:
+            continue
+        rounds.setdefault(number, []).append(match)
+    return [(number, sorted(matches, key=lambda match: (
+        len(str(match.get("identifier") or "")), str(match.get("identifier") or ""), str(match.get("id") or "")
+    ))) for number, matches in sorted(rounds.items())]
+
+
 def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
-    """Create the canvas only. Match cards and connections are added in later steps.
+    """Draw Winners round columns. Connections, Losers and Grand Final follow later.
 
     Dimensions are pixels. Long headings wrap and increase the canvas height
     when necessary. Synchronization time comes from the snapshot, never now().
@@ -21,13 +43,21 @@ def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
     else:
         raise ValueError("updated_at must be a timezone-aware datetime or None.")
 
+    rounds = _winners_rounds(data.get("sets") or [])
+    if rounds:
+        width = max(width, 128 + len(rounds) * MATCH_CARD_WIDTH + (len(rounds) - 1) * ROUND_GAP)
     phase = data.get("phase") or {}
     group = data.get("phase_group") or {}
     group_label = group.get("displayIdentifier") or group.get("id", "?")
     title_lines = wrap(str(data.get("event_name") or "Tournament"), width=(width - 96) // 24)
     subtitle_lines = wrap(f"{phase.get('name') or 'Bracket'} / Group {group_label}", width=(width - 96) // 14)
     content_top = 98 + len(title_lines) * 36 + len(subtitle_lines) * 24 + 20
-    height = max(height, content_top + 240)
+    round_labels = [wrap(matches[0].get("fullRoundText") or f"Winners Round {number}",
+                         width=MATCH_CARD_WIDTH // 14) for number, matches in rounds]
+    heading_height = max((len(lines) * 24 for lines in round_labels), default=0) + 32
+    rows = max((len(matches) for _, matches in rounds), default=0)
+    cards_height = rows * MATCH_CARD_HEIGHT + max(0, rows - 1) * MATCH_GAP
+    height = max(height, content_top + 240, content_top + heading_height + cards_height + 112)
     svg = Element("svg", {
         "xmlns": "http://www.w3.org/2000/svg", "width": str(width), "height": str(height),
         "viewBox": f"0 0 {width} {height}", "role": "img",
@@ -53,12 +83,23 @@ def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
         "height": str(height - content_top - 80), "rx": "12",
         "fill": "#111a2d", "stroke": "#28344c",
     })
-    SubElement(svg, "g", {"id": "bracket-content"})
+    content = SubElement(svg, "g", {"id": "bracket-content", "font-family": "'Press Start 2P'", "font-weight": "normal"})
+    for column, ((number, matches), labels) in enumerate(zip(rounds, round_labels)):
+        x = 64 + column * (MATCH_CARD_WIDTH + ROUND_GAP)
+        for line_index, label in enumerate(labels):
+            SubElement(content, "text", {
+                "x": str(x), "y": str(content_top + 32 + line_index * 24),
+                "font-size": "14", "fill": "#f6d54a",
+            }).text = label
+        for row, match in enumerate(matches):
+            # Initial column spacing; prerequisite-based alignment belongs to the connections step.
+            y = content_top + heading_height + (row + 0.5) * (cards_height + MATCH_GAP) / len(matches) - (MATCH_CARD_HEIGHT + MATCH_GAP) / 2
+            card = create_match_card(match, x=x, y=round(y), width=MATCH_CARD_WIDTH)
+            card.set("data-set-id", str(match.get("id", "")))
+            card.set("data-round", str(number))
+            content.append(card)
     text(timestamp, height - 32, 12, "#aab6ce")
     return tostring(svg, encoding="unicode")
-
-
-MATCH_CARD_HEIGHT = 128
 
 
 def create_match_card(set_data: dict, x: int = 0, y: int = 0, width: int = 360) -> Element:

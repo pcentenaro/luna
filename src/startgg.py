@@ -229,15 +229,21 @@ class StartGGClient:
                       }
                       nodes {
                         id
+                        identifier
                         fullRoundText
                         round
                         state
                         winnerId
-                        slots {
+                        slots(includeByes: true) {
                           prereqId
                           prereqPlacement
                           prereqType
                           slotIndex
+                          seed {
+                            id
+                            seedNum
+                            isBye
+                          }
                           standing {
                             stats {
                               score {

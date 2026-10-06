@@ -80,7 +80,7 @@ def create_match_card(set_data: dict, x: int = 0, y: int = 0, width: int = 360) 
     completed = state in {"3", "completed"}
     status = {"1": "Pending", "created": "Pending", "2": "In progress", "active": "In progress",
               "3": "Completed", "completed": "Completed", "4": "Ready", "ready": "Ready",
-              "5": "Invalid", "6": "Called", "7": "Queued"}.get(state, "Unknown")
+              "5": "Invalid", "6": "Called", "7": "Queued","8" : "DQ" }.get(state, "Unknown")
     card = Element("g", {"transform": f"translate({x} {y})", "font-family": "'Press Start 2P'", "font-weight": "normal"})
     SubElement(card, "title").text = str(set_data.get("fullRoundText") or "Match")
     SubElement(card, "rect", {"width": str(width), "height": str(MATCH_CARD_HEIGHT), "rx": "8", "fill": "#1b2840", "stroke": "#3b4b67"})

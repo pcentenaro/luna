@@ -1,5 +1,6 @@
 """Render a pool summary from the same isolated snapshot as the bracket."""
 
+from datetime import datetime, timezone
 from textwrap import wrap
 from xml.etree.ElementTree import Element, SubElement, tostring
 
@@ -103,8 +104,17 @@ def create_pool_card(data: dict, x: int = 0, y: int = 0, *, summary: dict | None
     return card
 
 
-def create_pools_svg(summary: dict) -> str:
+def create_pools_svg(summary: dict, *, page: int = 1, page_count: int = 1) -> str:
     """Arrange prepared pools in two columns, preserving their supplied order."""
+    if type(page) is not int or type(page_count) is not int or not 1 <= page <= page_count:
+        raise ValueError("The page must be between 1 and page_count.")
+    updated_at = summary.get("updated_at")
+    if updated_at is None:
+        timestamp = "EVENT SYNC TIME UNKNOWN"
+    elif isinstance(updated_at, datetime) and updated_at.utcoffset() is not None:
+        timestamp = "EVENT SYNCED " + updated_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    else:
+        raise ValueError("updated_at must be a timezone-aware datetime or None.")
     pools = summary.get("pools") or []
     margin, gap = 32, 32
     columns = min(2, max(1, len(pools)))
@@ -125,7 +135,7 @@ def create_pools_svg(summary: dict) -> str:
             content.append(card)
             cards.append(card)
         y += max(int(card.find("rect").get("height")) for card in cards) + gap
-    height = y if pools else cards_top + 80
+    height = (y if pools else cards_top + 80) + 40
     svg = Element("svg", {"xmlns": "http://www.w3.org/2000/svg",
                          "width": str(width), "height": str(height),
                          "viewBox": f"0 0 {width} {height}", "role": "img"})
@@ -141,6 +151,11 @@ def create_pools_svg(summary: dict) -> str:
     if not pools:
         SubElement(heading, "text", {"x": str(margin), "y": str(cards_top + 24),
                                      "font-size": "12", "fill": "#aab6ce"}).text = "No pools available"
+    SubElement(heading, "text", {"x": str(margin), "y": str(height - 20), "font-size": "12",
+                                 "fill": "#aab6ce"}).text = timestamp
+    SubElement(heading, "text", {"x": str(width - margin), "y": str(height - 20),
+                                 "font-size": "12", "fill": "#aab6ce",
+                                 "text-anchor": "end"}).text = f"PAGE {page}/{page_count}"
     svg.append(content)
     return tostring(svg, encoding="unicode")
 
@@ -149,6 +164,7 @@ def create_pools_svg_pages(summary: dict) -> list[str]:
     """Render up to two pools per page, retaining the event-wide destinations."""
     pools = summary.get("pools") or []
     return [
-        create_pools_svg({**summary, "pools": pools[start:start + 2]})
+        create_pools_svg({**summary, "pools": pools[start:start + 2]},
+                         page=start // 2 + 1, page_count=max(1, (len(pools) + 1) // 2))
         for start in range(0, max(1, len(pools)), 2)
     ]

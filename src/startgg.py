@@ -289,32 +289,49 @@ class StartGGClient:
             page += 1
 
     async def get_phase_group_standings(self, phase_group_id: int) -> list[dict]:
-        data = await self.query(
-            """
-            query PhaseGroupStandings($phaseGroupId: ID!) {
-              phaseGroup(id: $phaseGroupId) {
-                standings(query: {page: 1, perPage: 100}) {
-                  nodes {
-                    placement
-                    entrant {
-                      id
-                      name
-                      participants {
-                        player {
+        results = []
+        page = 1
+        while True:
+            data = await self.query(
+                """
+                query PhaseGroupStandings($phaseGroupId: ID!, $page: Int!) {
+                  phaseGroup(id: $phaseGroupId) {
+                    standings(query: {page: $page, perPage: 100}) {
+                      pageInfo { totalPages }
+                      nodes {
+                        placement
+                        entrant {
                           id
+                          name
+                          participants {
+                            player {
+                              id
+                            }
+                          }
                         }
                       }
                     }
                   }
                 }
-              }
-            }
-            """,
-            {"phaseGroupId": phase_group_id},
-        )
-        phase_group = data.get("phaseGroup")
-        standings = phase_group.get("standings", {}) if phase_group else {}
-        return standings.get("nodes", [])
+                """,
+                {"phaseGroupId": phase_group_id, "page": page},
+            )
+            group = data.get("phaseGroup")
+            connection = group.get("standings") if isinstance(group, dict) else None
+            if not isinstance(connection, dict):
+                raise StartGGError("start.gg did not return standings for the requested group")
+            nodes = connection.get("nodes")
+            total_pages = (connection.get("pageInfo") or {}).get("totalPages")
+            if (not isinstance(nodes, list) or type(total_pages) is not int or total_pages < 0
+                    or any(not isinstance(row, dict) for row in nodes)):
+                raise StartGGError("start.gg returned invalid standings pagination data")
+            if not nodes and page < total_pages:
+                raise StartGGError("start.gg returned an empty page before the end of standings")
+            results.extend(nodes)
+            if page >= total_pages:
+                return results
+            page += 1
+
 
     async def get_set(self, set_id: int) -> dict | None:
         data = await self.query(

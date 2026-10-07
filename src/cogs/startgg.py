@@ -1160,13 +1160,22 @@ async def _refresh_event_cache(active_event: dict, generation: int) -> list[dict
             pinged_waiting_players.difference_update({
                 key for key in pinged_waiting_players if key[1] in reopened
             })
+            synced_at = datetime.now(timezone.utc)
+            state["standings_updated_at"] = {group_id: synced_at for group_id in state["standings"]}
+            if event_cache.get("event_id") == active_event["event_id"]:
+                for group_id in state["standings_errors"]:
+                    if group_id in event_cache.get("standings", {}):
+                        state["standings"][group_id] = event_cache["standings"][group_id]
+                        state["standings_updated_at"][group_id] = event_cache.get(
+                            "standings_updated_at", {}
+                        ).get(group_id)
             event_cache.clear()
             event_cache.update(
                 {
                     "event_id": active_event["event_id"],
                     "event_name": active_event["event_name"],
                     **state,
-                    "updated_at": datetime.now(timezone.utc),
+                    "updated_at": synced_at,
                 }
             )
         return get_cached_reportable_matches(active_event)
@@ -1710,16 +1719,25 @@ async def fetch_event_state(event_id: int) -> dict:
         asyncio.gather(*[
             config.startgg_client.get_phase_group_standings(int(group["id"]))
             for group in pool_groups
-        ]),
+        ], return_exceptions=True),
     )
-    standings = {int(group["id"]): rows for group, rows in zip(pool_groups, standing_results)}
+    standings = {}
+    standings_errors = {}
+    for group, rows in zip(pool_groups, standing_results):
+        group_id = int(group["id"])
+        if isinstance(rows, StartGGError):
+            standings_errors[group_id] = str(rows)
+        elif isinstance(rows, BaseException):
+            raise rows
+        else:
+            standings[group_id] = rows
     matches = [
         {"phase": phase, "phase_group": group, "set": set_data}
         for (phase, group), sets in zip(groups_with_phases, set_results)
         for set_data in sets
     ]
     return {"phases": phases, "phase_groups": phase_groups, "matches": sort_set_matches(matches),
-            "standings": standings}
+            "standings": standings, "standings_errors": standings_errors}
 
 
 def is_active_phase_group(phase_group: dict) -> bool:

@@ -1,6 +1,7 @@
 """Render a pool summary from the same isolated snapshot as the bracket."""
 
-from xml.etree.ElementTree import Element, SubElement
+from textwrap import wrap
+from xml.etree.ElementTree import Element, SubElement, tostring
 
 
 POOL_CARD_WIDTH = 800
@@ -98,3 +99,43 @@ def create_pool_card(data: dict, x: int = 0, y: int = 0, *, summary: dict | None
         note = "Standings outdated" if data.get("standings") is not None else "Standings unavailable"
         text(note, 24, height - 16, 10, "#f6d54a", 59)
     return card
+
+
+def create_pools_svg(summary: dict) -> str:
+    """Arrange prepared pools in two columns, preserving their supplied order."""
+    pools = summary.get("pools") or []
+    margin, gap = 32, 32
+    columns = min(2, max(1, len(pools)))
+    width = margin * 2 + columns * POOL_CARD_WIDTH + (columns - 1) * gap
+    title = " ".join(str(summary.get("event_name") or "Tournament").split()) or "Tournament"
+    title_lines = wrap(title, width=(width - margin * 2) // 24)
+    cards_top = 98 + len(title_lines) * 36 + 24
+    content = Element("g", {"id": "pool-grid"})
+    y = cards_top
+    for start in range(0, len(pools), columns):
+        cards = []
+        for column, pool in enumerate(pools[start:start + columns]):
+            card = create_pool_card(pool, x=margin + column * (POOL_CARD_WIDTH + gap),
+                                    y=y, summary=summary)
+            card.set("data-pool-id", str((pool.get("phase_group") or {}).get("id", "")))
+            content.append(card)
+            cards.append(card)
+        y += max(int(card.find("rect").get("height")) for card in cards) + gap
+    height = y if pools else cards_top + 80
+    svg = Element("svg", {"xmlns": "http://www.w3.org/2000/svg",
+                         "width": str(width), "height": str(height),
+                         "viewBox": f"0 0 {width} {height}", "role": "img"})
+    SubElement(svg, "title").text = f"{title} - Pool standings"
+    SubElement(svg, "rect", {"width": str(width), "height": str(height), "fill": "#0b1020"})
+    SubElement(svg, "rect", {"width": str(width), "height": "6", "fill": "#f6d54a"})
+    heading = SubElement(svg, "g", {"font-family": "'Press Start 2P'", "font-weight": "normal"})
+    SubElement(heading, "text", {"x": str(margin), "y": "48", "font-size": "12",
+                                 "fill": "#f6d54a"}).text = "LUNA / POOLS"
+    for index, line in enumerate(title_lines):
+        SubElement(heading, "text", {"x": str(margin), "y": str(98 + index * 36),
+                                     "font-size": "24", "fill": "#f3f5fb"}).text = line
+    if not pools:
+        SubElement(heading, "text", {"x": str(margin), "y": str(cards_top + 24),
+                                     "font-size": "12", "fill": "#aab6ce"}).text = "No pools available"
+    svg.append(content)
+    return tostring(svg, encoding="unicode")

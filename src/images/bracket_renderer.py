@@ -92,10 +92,11 @@ def _bracket_positions(rounds):
     return positions, edges
 
 
-def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
+def create_bracket_svg(data: dict, width: int = 640, height: int = 360) -> str:
     """Draw Winners (including Grand Final/reset) above Losers.
 
-    Dimensions are pixels. Long headings wrap and increase the canvas height
+    Dimensions are minimum pixel sizes; the content expands the canvas.
+    Long headings wrap and increase the canvas height
     when necessary. Synchronization time comes from the snapshot, never now().
     """
     if type(width) is not int or type(height) is not int or width < 640 or height < 360:
@@ -116,7 +117,7 @@ def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
     phase = data.get("phase") or {}
     group = data.get("phase_group") or {}
     group_label = group.get("displayIdentifier") or group.get("id", "?")
-    title_lines = wrap(str(data.get("event_name") or "Tournament"), width=(width - 96) // 24)
+    title_lines = wrap(" ".join(str(data.get("event_name") or "Tournament").split()) or "Tournament", width=(width - 96) // 24)
     subtitle_lines = wrap(f"{phase.get('name') or 'Bracket'} / Group {group_label}", width=(width - 96) // 14)
     content_top = 98 + len(title_lines) * 36 + len(subtitle_lines) * 24 + 20
     layouts = []
@@ -222,7 +223,7 @@ def create_match_card(set_data: dict, x: int = 0, y: int = 0, width: int = 360) 
         if label != full:
             SubElement(node, "title").text = full
 
-    text(set_data.get("identifier") or set_data.get("id") or "?", 12, 22, 10, "#f6d54a", (width - 164) // 10)
+    text(set_data.get("identifier") or set_data.get("id") or "?", 12, 22, 10, "#f6d54a", (width - 36 - len(status) * 10) // 10)
     text(status, width - 12, 22, 10, "#aab6ce", 14, "end")
     for index in range(2):
         slot = slots[index] if index < len(slots) else {}
@@ -236,7 +237,10 @@ def create_match_card(set_data: dict, x: int = 0, y: int = 0, width: int = 360) 
             SubElement(card, "rect", {"x": "1", "y": str(top), "width": str(width - 2), "height": "47", "fill": "#294331"})
             text(">", 10, top + 30, 12, "#f6d54a", 1)
         SubElement(card, "line", {"x1": "1", "y1": str(top), "x2": str(width - 1), "y2": str(top), "stroke": "#3b4b67"})
-        text(name, 32, top + 30, 12, "#f3f5fb" if entrant else "#aab6ce", (width - 104) // 12)
+        name = " ".join(str(name).split())
+        name_width = width - 104  # Keep the score column and its gap clear.
+        name_size = max(10, min(12, name_width // max(1, len(name))))
+        text(name, 32, top + 30, name_size, "#f3f5fb" if entrant else "#aab6ce", name_width // name_size)
         score = (((slot.get("standing") or {}).get("stats") or {}).get("score") or {}).get("value")
         text(score if score is not None else "—", width - 16, top + 30, 14, "#f6d54a" if winner else "#f3f5fb", 4, "end")
     return card

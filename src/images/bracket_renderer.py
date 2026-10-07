@@ -14,18 +14,27 @@ SECTION_GAP = 64
 
 def _bracket_rounds(sets: list[dict], *, losers: bool = False) -> list[tuple[int, list[dict]]]:
     rounds = {}
+    finals = []
     for match in sets:
         number = match.get("round")
         if number is None:
             continue
         number = int(number)
         label = " ".join(str(match.get("fullRoundText") or "").casefold().split())
-        if number == 0 or (number < 0) != losers or "grand final" in label:
+        if "grand final" in label:
+            if not losers:
+                finals.append((number, match))
+            continue
+        if number == 0 or (number < 0) != losers:
             continue
         rounds.setdefault(number, []).append(match)
     return [(number, sorted(matches, key=lambda match: (
         len(str(match.get("identifier") or "")), str(match.get("identifier") or ""), str(match.get("id") or "")
-    ))) for number, matches in sorted(rounds.items(), key=lambda item: abs(item[0]))]
+    ))) for number, matches in sorted(rounds.items(), key=lambda item: abs(item[0]))] + [
+        (number, [match]) for number, match in sorted(finals, key=lambda item: (
+            "reset" in str(item[1].get("fullRoundText")).casefold(), item[0], str(item[1]["id"])
+        ))
+    ]
 
 
 def _bracket_positions(rounds):
@@ -84,7 +93,7 @@ def _bracket_positions(rounds):
 
 
 def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
-    """Draw Winners and Losers sections. Grand Final follows later.
+    """Draw Winners (including Grand Final/reset) above Losers.
 
     Dimensions are pixels. Long headings wrap and increase the canvas height
     when necessary. Synchronization time comes from the snapshot, never now().

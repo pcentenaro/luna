@@ -143,3 +143,12 @@ def create_pools_svg(summary: dict) -> str:
                                      "font-size": "12", "fill": "#aab6ce"}).text = "No pools available"
     svg.append(content)
     return tostring(svg, encoding="unicode")
+
+
+def create_pools_svg_pages(summary: dict) -> list[str]:
+    """Render up to two pools per page, retaining the event-wide destinations."""
+    pools = summary.get("pools") or []
+    return [
+        create_pools_svg({**summary, "pools": pools[start:start + 2]})
+        for start in range(0, max(1, len(pools)), 2)
+    ]

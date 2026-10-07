@@ -32,6 +32,8 @@ def build_pool_data(event_state: dict, event_id: int, phase_group_id: int) -> di
 def build_pools_summary_data(event_state: dict, event_id: int) -> dict:
     """Calculate destinations once across all pools, using the seeding rules.
 
+    Status is unavailable, provisional, or completed (all pools finished).
+    Review flags are independent: a completed calculation can still contain ties.
     Destinations are calculated assignments, not brackets published on start.gg.
     Do not split an incomplete or stale collection into misleading bracket sizes.
     """
@@ -49,7 +51,13 @@ def build_pools_summary_data(event_state: dict, event_id: int) -> dict:
         "updated_at": event_state.get("updated_at"),
         "pools": pools, "ranked": [], "brackets": [], "destinations": {},
         "ranking_warnings": [],
+        "classification_status": "unavailable",
+        "requires_review": False,
+
     }
+    if not pools:
+        result["ranking_warnings"] = ["No pools are available to calculate destinations."]
+        return result
     if any(pool["standings"] is None or pool["standings_error"]
            or not pool["players"] or len(pool["players"]) != len(pool["standings"])
            for pool in pools):
@@ -60,10 +68,24 @@ def build_pools_summary_data(event_state: dict, event_id: int) -> dict:
         raise ValueError("An entrant appears in multiple pools; a unique pool stage is required.")
     ranked, warnings = rank_players(players)
     brackets = split_into_brackets(ranked)
+    tied_entrant_ids = {
+        player.entrant_id
+        for first, second in zip(ranked, ranked[1:])
+        if first.competitive_key() == second.competitive_key()
+        for player in (first, second)
+    }
+    classification_status = (
+        "completed" if all(str(pool["phase_group"].get("state")).casefold() in {"3", "completed"}
+                           for pool in pools) else "provisional"
+    )
     result.update(
         ranked=ranked, brackets=brackets, ranking_warnings=warnings,
+        classification_status=classification_status, requires_review=bool(warnings),
         destinations={
-            player.entrant_id: {"bracket": bracket.name, "seed": seed}
+            player.entrant_id: {
+                "bracket": bracket.name, "seed": seed,
+                "requires_review": player.entrant_id in tied_entrant_ids,
+            }
             for bracket in brackets
             for seed, player in enumerate(bracket.players, start=1)
         },

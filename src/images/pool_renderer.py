@@ -14,14 +14,16 @@ BRACKET_COLORS = {
 }
 
 
-def create_pool_card(data: dict, x: int = 0, y: int = 0, *, summary: dict | None = None) -> Element:
-    """Return a pool card whose height grows with its standings table."""
+def create_pool_card(data: dict, x: int = 0, y: int = 0, *, summary: dict | None = None, min_rows: int = 0) -> Element:
+    """Reserve min_rows to align adjacent tables without adding player rows."""
+    if type(min_rows) is not int or min_rows < 0:
+        raise ValueError("min_rows must be a non-negative integer.")
     group = data.get("phase_group") or {}
     phase = data.get("phase") or {}
     players = sorted(data.get("players") or [], key=lambda player: (
         player.placement, player.name.casefold(), player.entrant_id
     ))
-    table_bottom = POOL_CARD_HEIGHT + max(1, len(players)) * POOL_ROW_HEIGHT
+    table_bottom = POOL_CARD_HEIGHT + max(1, len(players), min_rows) * POOL_ROW_HEIGHT
     height = table_bottom + (96 if summary is not None else 0)
     classification = (summary or {}).get("classification_status", "unavailable")
     destinations = (summary or {}).get("destinations", {}) if classification in {"provisional", "completed"} else {}
@@ -114,9 +116,11 @@ def create_pools_svg(summary: dict) -> str:
     y = cards_top
     for start in range(0, len(pools), columns):
         cards = []
-        for column, pool in enumerate(pools[start:start + columns]):
+        row_pools = pools[start:start + columns]
+        min_rows = max(len(pool.get("players") or []) for pool in row_pools)
+        for column, pool in enumerate(row_pools):
             card = create_pool_card(pool, x=margin + column * (POOL_CARD_WIDTH + gap),
-                                    y=y, summary=summary)
+                                    y=y, summary=summary, min_rows=min_rows)
             card.set("data-pool-id", str((pool.get("phase_group") or {}).get("id", "")))
             content.append(card)
             cards.append(card)

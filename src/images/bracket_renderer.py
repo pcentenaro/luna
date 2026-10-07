@@ -9,9 +9,10 @@ MATCH_CARD_WIDTH = 360
 MATCH_CARD_HEIGHT = 128
 ROUND_GAP = 56
 MATCH_GAP = 32
+SECTION_GAP = 64
 
 
-def _winners_rounds(sets: list[dict]) -> list[tuple[int, list[dict]]]:
+def _bracket_rounds(sets: list[dict], *, losers: bool = False) -> list[tuple[int, list[dict]]]:
     rounds = {}
     for match in sets:
         number = match.get("round")
@@ -19,20 +20,20 @@ def _winners_rounds(sets: list[dict]) -> list[tuple[int, list[dict]]]:
             continue
         number = int(number)
         label = " ".join(str(match.get("fullRoundText") or "").casefold().split())
-        if number <= 0 or "grand final" in label:
+        if number == 0 or (number < 0) != losers or "grand final" in label:
             continue
         rounds.setdefault(number, []).append(match)
     return [(number, sorted(matches, key=lambda match: (
         len(str(match.get("identifier") or "")), str(match.get("identifier") or ""), str(match.get("id") or "")
-    ))) for number, matches in sorted(rounds.items())]
+    ))) for number, matches in sorted(rounds.items(), key=lambda item: abs(item[0]))]
 
 
-def _winners_positions(rounds):
-    """Place each winner tree by its source sets, keeping disconnected sets separate."""
+def _bracket_positions(rounds):
+    """Place each advancement tree by its source sets, keeping disconnected sets separate."""
     matches = {str(match["id"]): match for _, group in rounds for match in group}
     columns = {str(match["id"]): column for column, (_, group) in enumerate(rounds) for match in group}
     if len(matches) != sum(len(group) for _, group in rounds):
-        raise ValueError("Duplicate set IDs in Winners bracket.")
+        raise ValueError("Duplicate set IDs in bracket section.")
     sources = {key: [] for key in matches}
     edges = []
     used_sources = set()
@@ -46,9 +47,9 @@ def _winners_positions(rounds):
                     or str(slot.get("prereqPlacement")) != "1" or source not in matches):
                 continue
             if columns[source] >= columns[target]:
-                raise ValueError("A Winners prerequisite must belong to an earlier round.")
+                raise ValueError("A set prerequisite must belong to an earlier round.")
             if source in used_sources:
-                raise ValueError("A Winners set cannot advance to multiple slots.")
+                raise ValueError("A set cannot advance to multiple slots.")
             used_sources.add(source)
             sources[target].append(source)
             edges.append((source, target, row))
@@ -83,7 +84,7 @@ def _winners_positions(rounds):
 
 
 def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
-    """Draw connected Winners rounds. Losers and Grand Final follow later.
+    """Draw Winners and Losers sections. Grand Final follows later.
 
     Dimensions are pixels. Long headings wrap and increase the canvas height
     when necessary. Synchronization time comes from the snapshot, never now().
@@ -98,21 +99,31 @@ def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
     else:
         raise ValueError("updated_at must be a timezone-aware datetime or None.")
 
-    rounds = _winners_rounds(data.get("sets") or [])
-    if rounds:
-        width = max(width, 128 + len(rounds) * MATCH_CARD_WIDTH + (len(rounds) - 1) * ROUND_GAP)
+    sections = [(name, _bracket_rounds(data.get("sets") or [], losers=losers))
+                for name, losers in (("Winners", False), ("Losers", True))]
+    columns = max(len(rounds) for _, rounds in sections)
+    if columns:
+        width = max(width, 128 + columns * MATCH_CARD_WIDTH + (columns - 1) * ROUND_GAP)
     phase = data.get("phase") or {}
     group = data.get("phase_group") or {}
     group_label = group.get("displayIdentifier") or group.get("id", "?")
     title_lines = wrap(str(data.get("event_name") or "Tournament"), width=(width - 96) // 24)
     subtitle_lines = wrap(f"{phase.get('name') or 'Bracket'} / Group {group_label}", width=(width - 96) // 14)
     content_top = 98 + len(title_lines) * 36 + len(subtitle_lines) * 24 + 20
-    round_labels = [wrap(matches[0].get("fullRoundText") or f"Winners Round {number}",
-                         width=MATCH_CARD_WIDTH // 14) for number, matches in rounds]
-    heading_height = max((len(lines) * 24 for lines in round_labels), default=0) + 32
-    positions, edges = _winners_positions(rounds)
-    cards_height = max((y + MATCH_CARD_HEIGHT for _, y in positions.values()), default=0)
-    height = max(height, content_top + 240, content_top + heading_height + cards_height + 112)
+    layouts = []
+    section_top = content_top
+    for name, rounds in sections:
+        if not rounds:
+            continue
+        round_labels = [wrap(matches[0].get("fullRoundText") or f"{name} Round {abs(number)}",
+                             width=MATCH_CARD_WIDTH // 14) for number, matches in rounds]
+        heading_height = max(len(lines) * 24 for lines in round_labels) + 32
+        positions, edges = _bracket_positions(rounds)
+        cards_height = max(y + MATCH_CARD_HEIGHT for _, y in positions.values())
+        layouts.append((name, rounds, round_labels, heading_height, positions, edges, section_top))
+        section_top += heading_height + cards_height + SECTION_GAP
+    content_bottom = section_top - SECTION_GAP if layouts else content_top
+    height = max(height, content_top + 240, content_bottom + 112)
     svg = Element("svg", {
         "xmlns": "http://www.w3.org/2000/svg", "width": str(width), "height": str(height),
         "viewBox": f"0 0 {width} {height}", "role": "img",
@@ -139,32 +150,33 @@ def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
         "fill": "#111a2d", "stroke": "#28344c",
     })
     content = SubElement(svg, "g", {"id": "bracket-content", "font-family": "'Press Start 2P'", "font-weight": "normal"})
-    connections = SubElement(content, "g", {"id": "winners-connections", "fill": "none", "stroke": "#7d91b5", "stroke-width": "2"})
-    for source, target, row in edges:
-        source_column, source_y = positions[source]
-        target_column, target_y = positions[target]
-        x1 = 64 + source_column * (MATCH_CARD_WIDTH + ROUND_GAP) + MATCH_CARD_WIDTH
-        x2 = 64 + target_column * (MATCH_CARD_WIDTH + ROUND_GAP)
-        y1 = content_top + heading_height + source_y + MATCH_CARD_HEIGHT / 2
-        y2 = content_top + heading_height + target_y + 32 + row * 48 + 24
-        bend = x2 - ROUND_GAP / 2
-        SubElement(connections, "path", {
-            "d": f"M {x1} {y1} H {bend} V {y2} H {x2}",
-            "data-source": source, "data-target": target, "data-slot": str(row),
-        })
-    for column, ((number, matches), labels) in enumerate(zip(rounds, round_labels)):
-        x = 64 + column * (MATCH_CARD_WIDTH + ROUND_GAP)
-        for line_index, label in enumerate(labels):
-            SubElement(content, "text", {
-                "x": str(x), "y": str(content_top + 32 + line_index * 24),
-                "font-size": "14", "fill": "#f6d54a",
-            }).text = label
-        for match in matches:
-            y = content_top + heading_height + positions[str(match["id"])][1]
-            card = create_match_card(match, x=x, y=round(y), width=MATCH_CARD_WIDTH)
-            card.set("data-set-id", str(match.get("id", "")))
-            card.set("data-round", str(number))
-            content.append(card)
+    for name, rounds, round_labels, heading_height, positions, edges, section_top in layouts:
+        connections = SubElement(content, "g", {"id": f"{name.lower()}-connections", "fill": "none", "stroke": "#7d91b5", "stroke-width": "2"})
+        for source, target, row in edges:
+            source_column, source_y = positions[source]
+            target_column, target_y = positions[target]
+            x1 = 64 + source_column * (MATCH_CARD_WIDTH + ROUND_GAP) + MATCH_CARD_WIDTH
+            x2 = 64 + target_column * (MATCH_CARD_WIDTH + ROUND_GAP)
+            y1 = section_top + heading_height + source_y + MATCH_CARD_HEIGHT / 2
+            y2 = section_top + heading_height + target_y + 32 + row * 48 + 24
+            bend = x2 - ROUND_GAP / 2
+            SubElement(connections, "path", {
+                "d": f"M {x1} {y1} H {bend} V {y2} H {x2}",
+                "data-source": source, "data-target": target, "data-slot": str(row),
+            })
+        for column, ((number, matches), labels) in enumerate(zip(rounds, round_labels)):
+            x = 64 + column * (MATCH_CARD_WIDTH + ROUND_GAP)
+            for line_index, label in enumerate(labels):
+                SubElement(content, "text", {
+                    "x": str(x), "y": str(section_top + 32 + line_index * 24),
+                    "font-size": "14", "fill": "#f6d54a",
+                }).text = label
+            for match in matches:
+                y = section_top + heading_height + positions[str(match["id"])][1]
+                card = create_match_card(match, x=x, y=round(y), width=MATCH_CARD_WIDTH)
+                card.set("data-set-id", str(match.get("id", "")))
+                card.set("data-round", str(number))
+                content.append(card)
     text(timestamp, height - 32, 12, "#aab6ce")
     return tostring(svg, encoding="unicode")
 

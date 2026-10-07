@@ -27,8 +27,63 @@ def _winners_rounds(sets: list[dict]) -> list[tuple[int, list[dict]]]:
     ))) for number, matches in sorted(rounds.items())]
 
 
+def _winners_positions(rounds):
+    """Place each winner tree by its source sets, keeping disconnected sets separate."""
+    matches = {str(match["id"]): match for _, group in rounds for match in group}
+    columns = {str(match["id"]): column for column, (_, group) in enumerate(rounds) for match in group}
+    if len(matches) != sum(len(group) for _, group in rounds):
+        raise ValueError("Duplicate set IDs in Winners bracket.")
+    sources = {key: [] for key in matches}
+    edges = []
+    used_sources = set()
+    for target, match in matches.items():
+        slots = sorted(enumerate(match.get("slots") or []), key=lambda item: (
+            item[1].get("slotIndex") if item[1].get("slotIndex") is not None else item[0]
+        ))
+        for row, (_, slot) in enumerate(slots):
+            source = str(slot.get("prereqId"))
+            if (str(slot.get("prereqType")).casefold() != "set"
+                    or str(slot.get("prereqPlacement")) != "1" or source not in matches):
+                continue
+            if columns[source] >= columns[target]:
+                raise ValueError("A Winners prerequisite must belong to an earlier round.")
+            if source in used_sources:
+                raise ValueError("A Winners set cannot advance to multiple slots.")
+            used_sources.add(source)
+            sources[target].append(source)
+            edges.append((source, target, row))
+
+    positions = {}
+    step = MATCH_CARD_HEIGHT + MATCH_GAP
+    if not edges:
+        # Missing prerequisites: retain independent columns without inventing connections.
+        rows = max((len(group) for _, group in rounds), default=0)
+        for column, (_, group) in enumerate(rounds):
+            for row, match in enumerate(group):
+                positions[str(match["id"])] = (column, round((row + 0.5) * rows * step / len(group) - step / 2))
+        return positions, edges
+
+    next_y = 0
+
+    def place(key):
+        nonlocal next_y
+        if sources[key]:
+            children = [place(source) for source in sources[key]]
+            y = (min(children) + max(children)) / 2
+        else:
+            y = next_y
+            next_y += step
+        positions[key] = (columns[key], round(y))
+        return y
+
+    for key in matches:
+        if key not in used_sources:
+            place(key)
+    return positions, edges
+
+
 def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
-    """Draw Winners round columns. Connections, Losers and Grand Final follow later.
+    """Draw connected Winners rounds. Losers and Grand Final follow later.
 
     Dimensions are pixels. Long headings wrap and increase the canvas height
     when necessary. Synchronization time comes from the snapshot, never now().
@@ -55,8 +110,8 @@ def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
     round_labels = [wrap(matches[0].get("fullRoundText") or f"Winners Round {number}",
                          width=MATCH_CARD_WIDTH // 14) for number, matches in rounds]
     heading_height = max((len(lines) * 24 for lines in round_labels), default=0) + 32
-    rows = max((len(matches) for _, matches in rounds), default=0)
-    cards_height = rows * MATCH_CARD_HEIGHT + max(0, rows - 1) * MATCH_GAP
+    positions, edges = _winners_positions(rounds)
+    cards_height = max((y + MATCH_CARD_HEIGHT for _, y in positions.values()), default=0)
     height = max(height, content_top + 240, content_top + heading_height + cards_height + 112)
     svg = Element("svg", {
         "xmlns": "http://www.w3.org/2000/svg", "width": str(width), "height": str(height),
@@ -84,6 +139,19 @@ def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
         "fill": "#111a2d", "stroke": "#28344c",
     })
     content = SubElement(svg, "g", {"id": "bracket-content", "font-family": "'Press Start 2P'", "font-weight": "normal"})
+    connections = SubElement(content, "g", {"id": "winners-connections", "fill": "none", "stroke": "#7d91b5", "stroke-width": "2"})
+    for source, target, row in edges:
+        source_column, source_y = positions[source]
+        target_column, target_y = positions[target]
+        x1 = 64 + source_column * (MATCH_CARD_WIDTH + ROUND_GAP) + MATCH_CARD_WIDTH
+        x2 = 64 + target_column * (MATCH_CARD_WIDTH + ROUND_GAP)
+        y1 = content_top + heading_height + source_y + MATCH_CARD_HEIGHT / 2
+        y2 = content_top + heading_height + target_y + 32 + row * 48 + 24
+        bend = x2 - ROUND_GAP / 2
+        SubElement(connections, "path", {
+            "d": f"M {x1} {y1} H {bend} V {y2} H {x2}",
+            "data-source": source, "data-target": target, "data-slot": str(row),
+        })
     for column, ((number, matches), labels) in enumerate(zip(rounds, round_labels)):
         x = 64 + column * (MATCH_CARD_WIDTH + ROUND_GAP)
         for line_index, label in enumerate(labels):
@@ -91,9 +159,8 @@ def create_bracket_svg(data: dict, width: int = 1280, height: int = 720) -> str:
                 "x": str(x), "y": str(content_top + 32 + line_index * 24),
                 "font-size": "14", "fill": "#f6d54a",
             }).text = label
-        for row, match in enumerate(matches):
-            # Initial column spacing; prerequisite-based alignment belongs to the connections step.
-            y = content_top + heading_height + (row + 0.5) * (cards_height + MATCH_GAP) / len(matches) - (MATCH_CARD_HEIGHT + MATCH_GAP) / 2
+        for match in matches:
+            y = content_top + heading_height + positions[str(match["id"])][1]
             card = create_match_card(match, x=x, y=round(y), width=MATCH_CARD_WIDTH)
             card.set("data-set-id", str(match.get("id", "")))
             card.set("data-round", str(number))

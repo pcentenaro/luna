@@ -32,16 +32,6 @@ all Unicode characters; unsupported player names need a separate fallback.
 The podium's existing **Bebas Neue** styling is separate and still needs that
 font installed to render as designed.
 
-To verify SVG conversion and the bracket fonts without starting the bot:
-
-```bash
-venv/bin/python -m unittest discover -s src -p test_svg_environment.py -v
-```
-
-Pillow is not required for SVG rendering. If installed for the earlier bracket
-prototype, it can be removed from Luna's virtual environment with
-`venv/bin/python -m pip uninstall Pillow`.
-
 With Python installed, go to the root directory of the repository and run
 
 ```bash

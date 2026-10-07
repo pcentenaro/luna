@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 from images.bracket_data import build_bracket_data
-from seeding import build_player_standings, is_pool_group
+from seeding import build_player_standings, is_pool_group, rank_players, split_into_brackets
 
 
 def build_pool_data(event_state: dict, event_id: int, phase_group_id: int) -> dict:
@@ -27,3 +27,45 @@ def build_pool_data(event_state: dict, event_id: int, phase_group_id: int) -> di
         sets=data["sets"],
     )
     return data
+
+
+def build_pools_summary_data(event_state: dict, event_id: int) -> dict:
+    """Calculate destinations once across all pools, using the seeding rules.
+
+    Destinations are calculated assignments, not brackets published on start.gg.
+    Do not split an incomplete or stale collection into misleading bracket sizes.
+    """
+    if event_state.get("event_id") is None or str(event_state["event_id"]) != str(event_id):
+        raise ValueError("The requested event is not loaded in the shared state.")
+    pools = [
+        build_pool_data(event_state, event_id, int(group["id"]))
+        for phase in event_state.get("phases", [])
+        for group in event_state.get("phase_groups", {}).get(int(phase["id"]), [])
+        if is_pool_group(phase, group)
+    ]
+    result = {
+        "event_id": event_state["event_id"],
+        "event_name": event_state.get("event_name"),
+        "updated_at": event_state.get("updated_at"),
+        "pools": pools, "ranked": [], "brackets": [], "destinations": {},
+        "ranking_warnings": [],
+    }
+    if any(pool["standings"] is None or pool["standings_error"]
+           or not pool["players"] or len(pool["players"]) != len(pool["standings"])
+           for pool in pools):
+        result["ranking_warnings"] = ["Complete, current standings are required for all pools to calculate destinations."]
+        return result
+    players = [player for pool in pools for player in pool["players"]]
+    if len({player.entrant_id for player in players}) != len(players):
+        raise ValueError("An entrant appears in multiple pools; a unique pool stage is required.")
+    ranked, warnings = rank_players(players)
+    brackets = split_into_brackets(ranked)
+    result.update(
+        ranked=ranked, brackets=brackets, ranking_warnings=warnings,
+        destinations={
+            player.entrant_id: {"bracket": bracket.name, "seed": seed}
+            for bracket in brackets
+            for seed, player in enumerate(bracket.players, start=1)
+        },
+    )
+    return result

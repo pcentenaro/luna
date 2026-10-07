@@ -8,6 +8,7 @@ from datetime import datetime
 from datetime import timezone
 from discord.ext import commands, tasks
 from participant_role import sync_participant_role
+from seeding import is_pool_group
 from pathlib import Path
 from pgrs import PGRSError
 from startgg import StartGGClient, StartGGError
@@ -1700,16 +1701,25 @@ async def fetch_event_state(event_id: int) -> dict:
         for phase in phases
         for group in phase_groups[int(phase["id"])]
     ]
-    set_results = await asyncio.gather(*[
-        config.startgg_client.get_phase_group_sets(int(group["id"]))
-        for _, group in groups_with_phases
-    ])
+    pool_groups = [group for phase, group in groups_with_phases if is_pool_group(phase, group)]
+    set_results, standing_results = await asyncio.gather(
+        asyncio.gather(*[
+            config.startgg_client.get_phase_group_sets(int(group["id"]))
+            for _, group in groups_with_phases
+        ]),
+        asyncio.gather(*[
+            config.startgg_client.get_phase_group_standings(int(group["id"]))
+            for group in pool_groups
+        ]),
+    )
+    standings = {int(group["id"]): rows for group, rows in zip(pool_groups, standing_results)}
     matches = [
         {"phase": phase, "phase_group": group, "set": set_data}
         for (phase, group), sets in zip(groups_with_phases, set_results)
         for set_data in sets
     ]
-    return {"phases": phases, "phase_groups": phase_groups, "matches": sort_set_matches(matches)}
+    return {"phases": phases, "phase_groups": phase_groups, "matches": sort_set_matches(matches),
+            "standings": standings}
 
 
 def is_active_phase_group(phase_group: dict) -> bool:

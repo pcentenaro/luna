@@ -288,3 +288,10 @@ def normalize_score(score: int | float | None) -> int:
     if score is None or score < 0:
         return 0
     return int(score)
+
+
+def is_pool_group(phase: dict, phase_group: dict) -> bool:
+    bracket_type = " ".join(str(phase_group.get("bracketType") or "").casefold().split())
+    if bracket_type:
+        return bracket_type == "round_robin"
+    return "pool" in str(phase.get("name") or "").casefold()

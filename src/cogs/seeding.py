@@ -3,7 +3,7 @@ import asyncio
 import config
 import discord
 from discord.ext import commands
-from seeding import build_player_standings, rank_players, split_into_brackets
+from seeding import build_player_standings, rank_players, split_into_brackets, is_pool_group
 from startgg import StartGGError
 
 
@@ -100,13 +100,6 @@ async def get_completed_pool_groups(event_id: int) -> dict:
 
     return {"error": None, "groups": groups}
 
-
-def is_pool_group(phase: dict, phase_group: dict) -> bool:
-    bracket_type = normalize_text(phase_group.get("bracketType") or "")
-    if bracket_type:
-        return bracket_type == "round_robin"
-
-    return "pool" in normalize_text(phase.get("name") or "")
 
 async def load_pool_seeding_data(phase_group: dict) -> list:
     phase_group_id = int(phase_group["id"])

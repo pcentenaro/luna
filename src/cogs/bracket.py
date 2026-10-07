@@ -15,6 +15,73 @@ from images.pool_renderer import create_pools_svg
 from seeding import is_pool_group
 
 
+class PoolPagesView(discord.ui.View):
+    def __init__(self, summary: dict, active_event: dict, user_id: int):
+        super().__init__(timeout=300)
+        self.summary = summary
+        self.active_event = active_event
+        self.user_id = user_id
+        self.page = 1
+        self.page_count = max(1, (len(summary["pools"]) + 1) // 2)
+        self.lock = asyncio.Lock()
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.previous.disabled = self.page <= 1
+        self.next_page.disabled = self.page >= self.page_count
+
+    @discord.ui.button(label="Anterior", style=discord.ButtonStyle.secondary)
+    async def previous(self, button, interaction):
+        await self.change_page(interaction, -1)
+
+    @discord.ui.button(label="Siguiente", style=discord.ButtonStyle.primary)
+    async def next_page(self, button, interaction):
+        await self.change_page(interaction, 1)
+
+    async def change_page(self, interaction: discord.Interaction, direction: int):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the user who used /bracket can navigate these pages.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        async with self.lock:
+            if config.config_store.get_active_event() != self.active_event:
+                await interaction.followup.send("The active event changed. Run /bracket again.", ephemeral=True)
+                return
+            page = self.page + direction
+            if not 1 <= page <= self.page_count:
+                return
+            try:
+                start = (page - 1) * 2
+                svg = await asyncio.to_thread(
+                    create_pools_svg, {**self.summary, "pools": self.summary["pools"][start:start + 2]},
+                    page=page, page_count=self.page_count,
+                )
+                png = await svg_to_png(svg)
+            except (ValueError, RuntimeError):
+                logging.exception("Could not render pool page %s", page)
+                await interaction.followup.send("Could not generate this page. Please try again.", ephemeral=True)
+                return
+            if config.config_store.get_active_event() != self.active_event:
+                await interaction.followup.send("The active event changed. Run /bracket again.", ephemeral=True)
+                return
+            previous_page = self.page
+            self.page = page
+            self.update_buttons()
+            attachment = discord.File(BytesIO(png), filename=f"pools-page-{page}.png")
+            try:
+                await interaction.edit_original_response(
+                    attachments=[], file=attachment, view=self,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                self.page = previous_page
+                self.update_buttons()
+                logging.exception("Could not update pool page")
+                await interaction.followup.send("Could not update this page. Please try again.", ephemeral=True)
+            finally:
+                attachment.close()
+
+
 class Bracket(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -91,9 +158,10 @@ class Bracket(commands.Cog):
         if config.config_store.get_active_event() != active_event:
             await ctx.respond("The active event changed. Run /bracket again.", ephemeral=True)
             return
+        view = PoolPagesView(summary, active_event.copy(), ctx.author.id) if group_id is None else None
         attachment = discord.File(BytesIO(png), filename=filename)
         try:
-            await ctx.respond(file=attachment, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            await ctx.respond(file=attachment, view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         finally:
             attachment.close()
 

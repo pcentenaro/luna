@@ -22,6 +22,11 @@ def _bracket_rounds(sets: list[dict], *, losers: bool = False) -> list[tuple[int
         number = int(number)
         label = " ".join(str(match.get("fullRoundText") or "").casefold().split())
         if "grand final" in label:
+            if "reset" in label:
+                state = str(match.get("state")).casefold()
+                has_players = sum(bool(slot.get("entrant")) for slot in match.get("slots") or []) == 2
+                if not has_players and state not in {"2", "active", "3", "completed", "4", "ready", "6", "called", "7", "queued"}:
+                    continue
             if not losers:
                 finals.append((number, match))
             continue

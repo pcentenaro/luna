@@ -19,6 +19,25 @@ from seeding import is_pool_group
 logger = logging.getLogger(__name__)
 
 
+async def group_choices(ctx: discord.AutocompleteContext):
+    active_event = config.config_store.get_active_event()
+    cached_event = event_cache.copy()
+    if active_event is None or cached_event.get("event_id") != active_event["event_id"]:
+        return []
+    query = str(ctx.value or "").casefold().strip()
+    choices = []
+    for phase in cached_event.get("phases", []):
+        for group in cached_event.get("phase_groups", {}).get(int(phase["id"]), []):
+            group_id = str(group["id"])
+            kind = "Pool" if is_pool_group(phase, group) else "Bracket"
+            label = f"{phase.get('name') or 'Phase'} - {kind} {group.get('displayIdentifier') or group_id}"
+            if query in label.casefold() or query in group_id:
+                choices.append(discord.OptionChoice(name=label[:100], value=group_id))
+                if len(choices) == 25:
+                    return choices
+    return choices
+
+
 class PoolPagesView(discord.ui.DesignerView):
     def __init__(self, summary: dict, active_event: dict, user_id: int, first_png: bytes):
         super().__init__(timeout=300)
@@ -131,7 +150,7 @@ class Bracket(commands.Cog):
     async def bracket(
         self,
         ctx: discord.ApplicationContext,
-        group_id: discord.Option(str, "start.gg phase group ID", required=False) = None,
+        group_id: discord.Option(str, "Choose a pool or bracket by name", required=False, autocomplete=group_choices) = None,
     ):
         active_event = config.config_store.get_active_event()
         if active_event is None:
@@ -147,6 +166,8 @@ class Bracket(commands.Cog):
         if not cached_event.get("phases") or not any(cached_event.get("phase_groups", {}).values()):
             await ctx.respond("No pools or brackets are available in the cached event yet.", ephemeral=True)
             return
+        selected_pool_id = None
+        show_pools = group_id is None
         if group_id is None:
             if not any(is_pool_group(phase, group)
                        for phase in cached_event["phases"]
@@ -169,21 +190,27 @@ class Bracket(commands.Cog):
             except ValueError:
                 await ctx.respond("That group is not in the cached event.", ephemeral=True)
                 return
-            if is_pool_group(data["phase"], data["phase_group"]):
-                await ctx.respond("Use /bracket without a group ID to view the pool standings.",
-                                  ephemeral=True)
-                return
-            if not data["sets"]:
-                await ctx.respond("No sets are available for this bracket yet.", ephemeral=True)
-                return
-            filename = f"bracket-{parsed_id}.png"
+            show_pools = is_pool_group(data["phase"], data["phase_group"])
+            if show_pools:
+                selected_pool_id = parsed_id
+                data = deepcopy(cached_event)
+                filename = "pools-page-1.png"
+            else:
+                if not data["sets"]:
+                    await ctx.respond("No sets are available for this bracket yet.", ephemeral=True)
+                    return
+                filename = f"bracket-{parsed_id}.png"
         defer_started = perf_counter()
         await ctx.defer(ephemeral=True)
         logger.info("Bracket image: acknowledge=%.3fs", perf_counter() - defer_started)
         render_started = perf_counter()
         try:
-            if group_id is None:
+            if show_pools:
                 summary = await asyncio.to_thread(build_pools_summary_data, data, active_event["event_id"])
+                if selected_pool_id is not None:
+                    # Keep destinations calculated across all pools before selecting the visible one.
+                    summary["pools"] = [pool for pool in summary["pools"]
+                                        if int(pool["phase_group"]["id"]) == selected_pool_id]
                 page_count = max(1, (len(summary["pools"]) + 1) // 2)
                 svg = await asyncio.to_thread(
                     create_pools_svg, {**summary, "pools": summary["pools"][:2]},
@@ -201,7 +228,7 @@ class Bracket(commands.Cog):
             return
         logger.info("Bracket image: group=%s render=%.3fs bytes=%s",
                      group_id, perf_counter() - render_started, len(png))
-        view = PoolPagesView(summary, active_event.copy(), ctx.author.id, png) if group_id is None else None
+        view = PoolPagesView(summary, active_event.copy(), ctx.author.id, png) if show_pools else None
         attachment = discord.File(BytesIO(png), filename=filename)
         try:
             send_started = perf_counter()

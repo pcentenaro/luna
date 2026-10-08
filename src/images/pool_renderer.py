@@ -95,7 +95,7 @@ def create_pool_card(data: dict, x: int = 0, y: int = 0, *, summary: dict | None
             for index, bracket in enumerate(summary.get("brackets", [])):
                 text(bracket.name, 24 + index * 188, table_bottom + 28, 10,
                      BRACKET_COLORS.get(bracket.name, "#f3f5fb"), 17)
-            if summary.get("requires_review"):
+            if any(destinations.get(player.entrant_id, {}).get("requires_review") for player in players):
                 text("* Unresolved tie - manual review required", 24, table_bottom + 52, 10, "#f6d54a", 75)
     if data.get("standings_error"):
         note = "Standings outdated" if data.get("standings") is not None else "Standings unavailable"

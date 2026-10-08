@@ -68,11 +68,13 @@ def build_pools_summary_data(event_state: dict, event_id: int) -> dict:
         raise ValueError("An entrant appears in multiple pools; a unique pool stage is required.")
     ranked, warnings = rank_players(players)
     brackets = split_into_brackets(ranked)
+    destinations_by_key = {}
+    for bracket in brackets:
+        for player in bracket.players:
+            destinations_by_key.setdefault(player.competitive_key(), set()).add(bracket.name)
     tied_entrant_ids = {
-        player.entrant_id
-        for first, second in zip(ranked, ranked[1:])
-        if first.competitive_key() == second.competitive_key()
-        for player in (first, second)
+        player.entrant_id for player in ranked
+        if len(destinations_by_key[player.competitive_key()]) > 1
     }
     classification_status = (
         "completed" if all(str(pool["phase_group"].get("state")).casefold() in {"3", "completed"}
@@ -80,7 +82,7 @@ def build_pools_summary_data(event_state: dict, event_id: int) -> dict:
     )
     result.update(
         ranked=ranked, brackets=brackets, ranking_warnings=warnings,
-        classification_status=classification_status, requires_review=bool(warnings),
+        classification_status=classification_status, requires_review=bool(tied_entrant_ids),
         destinations={
             player.entrant_id: {
                 "bracket": bracket.name, "seed": seed,

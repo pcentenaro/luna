@@ -381,6 +381,20 @@ class ConfigStore:
         self._save(data)
         return True
 
+    def get_bracket_image_messages(self, guild_id: int, event_id: int, channel_id: int) -> dict[str, int]:
+        messages = (self._load().get("bracket_image_messages", {})
+                    .get(str(guild_id), {}).get(str(event_id), {}).get(str(channel_id), {}))
+        return {image_key: int(message_id) for image_key, message_id in messages.items()}
+
+    def set_bracket_image_message(self, guild_id: int, event_id: int, channel_id: int,
+                                  image_key: str, message_id: int):
+        """Save each successful publication independently (e.g. pools:1 or bracket:123)."""
+        data = self._load()
+        messages = (data.setdefault("bracket_image_messages", {})
+                    .setdefault(str(guild_id), {}).setdefault(str(event_id), {}).setdefault(str(channel_id), {}))
+        messages[image_key] = str(message_id)
+        self._save(data)
+
     def get_completed_group_announcements(self, event_id: int) -> set[int]:
         return set(self._load().get("completed_group_announcements", {}).get(str(event_id), []))
 

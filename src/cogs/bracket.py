@@ -232,7 +232,10 @@ class Bracket(commands.Cog):
         attachment = discord.File(BytesIO(png), filename=filename)
         try:
             send_started = perf_counter()
-            await ctx.respond(file=attachment, view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            await ctx.respond(
+                file=attachment, ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
+                **({"view": view} if view is not None else {}),
+            )
             logger.info("Bracket image: Discord send=%.3fs", perf_counter() - send_started)
         finally:
             attachment.close()

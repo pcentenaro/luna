@@ -29,8 +29,8 @@ async def group_choices(ctx: discord.AutocompleteContext):
     for phase in cached_event.get("phases", []):
         for group in cached_event.get("phase_groups", {}).get(int(phase["id"]), []):
             group_id = str(group["id"])
-            kind = "Pool" if is_pool_group(phase, group) else "Bracket"
-            label = f"{phase.get('name') or 'Phase'} - {kind} {group.get('displayIdentifier') or group_id}"
+            group_label = f"Pool {group.get('displayIdentifier') or group_id}" if is_pool_group(phase, group) else "Bracket final"
+            label = f"{phase.get('name') or 'Phase'} - {group_label}"
             if query in label.casefold() or query in group_id:
                 choices.append(discord.OptionChoice(name=label[:100], value=group_id))
                 if len(choices) == 25:
@@ -175,7 +175,7 @@ class Bracket(commands.Cog):
     async def bracket(
         self,
         ctx: discord.ApplicationContext,
-        group_id: discord.Option(str, "Choose a pool or bracket by name", required=False, autocomplete=group_choices) = None,
+        fase: discord.Option(str, "Choose a pool or bracket by name", required=False, autocomplete=group_choices) = None,
     ):
         active_event = config.config_store.get_active_event()
         if active_event is None:
@@ -192,8 +192,8 @@ class Bracket(commands.Cog):
             await ctx.respond("No pools or brackets are available in the cached event yet.", ephemeral=True)
             return
         selected_pool_id = None
-        show_pools = group_id is None
-        if group_id is None:
+        show_pools = fase is None
+        if fase is None:
             if not any(is_pool_group(phase, group)
                        for phase in cached_event["phases"]
                        for group in cached_event["phase_groups"].get(int(phase["id"]), [])):
@@ -204,7 +204,7 @@ class Bracket(commands.Cog):
             filename = "pools-page-1.png"
         else:
             try:
-                parsed_id = int(group_id)
+                parsed_id = int(fase)
                 if parsed_id <= 0:
                     raise ValueError
             except ValueError:
@@ -245,14 +245,14 @@ class Bracket(commands.Cog):
                 svg = await asyncio.to_thread(create_bracket_svg, data)
             png = await svg_to_png(svg)
         except (ValueError, RuntimeError):
-            logger.exception("Could not render bracket request for group %s", group_id)
+            logger.exception("Could not render bracket request for group %s", fase)
             await ctx.respond("Could not generate the bracket image. Please try again later.", ephemeral=True)
             return
         if config.config_store.get_active_event() != active_event:
             await ctx.respond("The active event changed. Run /bracket again.", ephemeral=True)
             return
         logger.info("Bracket image: group=%s render=%.3fs bytes=%s",
-                     group_id, perf_counter() - render_started, len(png))
+                     fase, perf_counter() - render_started, len(png))
         view = PoolPagesView(summary, active_event.copy(), ctx.author.id, png) if show_pools else None
         if view is not None:
             view.parent = ctx.interaction

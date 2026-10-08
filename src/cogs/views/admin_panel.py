@@ -199,6 +199,7 @@ class ChannelSettingsView(discord.ui.View):
         super().__init__(timeout=300)
         self.add_item(LeaderboardChannelSelect())
         self.add_item(EventAnnouncementChannelSelect())
+        self.add_item(BracketImageChannelSelect())
 
     @discord.ui.button(label="Clear ranking channel", style=discord.ButtonStyle.danger, row=1)
     async def clear_clues_ranking_channel(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -226,6 +227,20 @@ class ChannelSettingsView(discord.ui.View):
         deleted = config.config_store.clear_event_announcement_channel_id(interaction.guild.id)
         await refresh_channel_settings_response(interaction)
         message = "Event announcement channel cleared." if deleted else "No event channel was configured."
+        await interaction.followup.send(message, ephemeral=True)
+
+
+    @discord.ui.button(label="Clear image channel", style=discord.ButtonStyle.danger, row=3)
+    async def clear_image_channel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can clear the image channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+        deleted = config.config_store.clear_bracket_image_channel_id(interaction.guild.id)
+        await refresh_channel_settings_response(interaction)
+        message = "Bracket image channel cleared." if deleted else "No image channel was configured."
         await interaction.followup.send(message, ephemeral=True)
 
 
@@ -339,6 +354,33 @@ class EventAnnouncementChannelSelect(discord.ui.Select):
         await interaction.followup.send(f"Event announcements will be posted in {channel.mention}.", ephemeral=True)
 
 
+class BracketImageChannelSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            select_type=discord.ComponentType.channel_select,
+            custom_id="admin:bracket_image_channel",
+            placeholder="Choose the bracket image channel",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            row=4,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the image channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+        channel = self.values[0]
+        permissions = channel.permissions_for(interaction.guild.me) if interaction.guild.me else None
+        if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links and permissions.attach_files):
+            await interaction.response.send_message("Luna needs View Channel, Send Messages Embed Links and Attach Files in that channel.", ephemeral=True)
+            return
+        config.config_store.set_bracket_image_channel_id(interaction.guild.id, channel.id)
+        await refresh_channel_settings_response(interaction)
+        await interaction.followup.send(f"Bracket image channel set to {channel.mention}.", ephemeral=True)
+
+
 def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
     leaderboard_channel_id = config.clues_store.get_leaderboard_channel_id(guild.id)
     leaderboard_channel_value = "Not configured"
@@ -358,6 +400,12 @@ def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
         f"Missing channel ID `{event_channel_id}`" if event_channel_id else "Not configured (uses the command channel)"
     )
     embed.add_field(name="Event announcements", value=event_channel_value)
+    image_channel_id = config.config_store.get_bracket_image_channel_id(guild.id)
+    image_channel = guild.get_channel(image_channel_id) if image_channel_id else None
+    image_channel_value = image_channel.mention if image_channel else (
+        f"Missing channel ID `{image_channel_id}`" if image_channel_id else "Not configured"
+    )
+    embed.add_field(name="Bracket images", value=image_channel_value)
     return embed
 
 

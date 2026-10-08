@@ -365,6 +365,22 @@ class ConfigStore:
         self._save(data)
         return True
 
+    def get_bracket_image_channel_id(self, guild_id: int) -> int | None:
+        channel_id = self._load().get("bracket_image_channels", {}).get(str(guild_id))
+        return int(channel_id) if channel_id else None
+
+    def set_bracket_image_channel_id(self, guild_id: int, channel_id: int):
+        data = self._load()
+        data.setdefault("bracket_image_channels", {})[str(guild_id)] = str(channel_id)
+        self._save(data)
+
+    def clear_bracket_image_channel_id(self, guild_id: int) -> bool:
+        data = self._load()
+        if data.get("bracket_image_channels", {}).pop(str(guild_id), None) is None:
+            return False
+        self._save(data)
+        return True
+
     def get_completed_group_announcements(self, event_id: int) -> set[int]:
         return set(self._load().get("completed_group_announcements", {}).get(str(event_id), []))
 

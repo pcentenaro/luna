@@ -6,7 +6,7 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 
 
 POOL_CARD_WIDTH = 800
-POOL_CARD_HEIGHT = 300
+POOL_CARD_HEIGHT = 268
 POOL_ROW_HEIGHT = 40
 BRACKET_COLORS = {
     "Maestro": "#ff8585", "Avanzado": "#67c8ff",
@@ -67,11 +67,10 @@ def create_pool_card(data: dict, x: int = 0, y: int = 0, *, summary: dict | None
         tx = 24 + column * 144
         text(count, tx, 151, 20, "#f3f5fb", 6)
         text(name, tx, 176, 10, "#aab6ce", 13)
-    text(f"Cached sets: {len(sets)}", 24, 216, 10, "#aab6ce", 43)
     for heading, tx in (("Pos", 24), ("Player", 80), ("Sets W-L", 388), ("Points +/-", 500), ("Destination", 640)):
-        text(heading, tx, 248, 10, "#aab6ce", 11)
+        text(heading, tx, 216, 10, "#aab6ce", 11)
     for index, player in enumerate(players):
-        top = 260 + index * POOL_ROW_HEIGHT
+        top = 228 + index * POOL_ROW_HEIGHT
         SubElement(card, "line", {"x1": "24", "y1": str(top), "x2": str(POOL_CARD_WIDTH - 24),
                                   "y2": str(top), "stroke": "#28344c"})
         text(player.placement, 24, top + 26, 10, "#f6d54a", 4)
@@ -85,7 +84,7 @@ def create_pool_card(data: dict, x: int = 0, y: int = 0, *, summary: dict | None
         text(f"{player.points_for}-{player.points_against}", 500, top + 26, 10, "#f3f5fb", 11)
     if not players:
         message = "Standings unavailable" if data.get("standings") is None else "No ranked players"
-        text(message, 24, 286, 10, "#aab6ce", 59)
+        text(message, 24, 254, 10, "#aab6ce", 59)
     if summary is not None:
         classification_label = {
             "provisional": "Provisional destinations - pools still open",

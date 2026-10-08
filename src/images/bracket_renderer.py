@@ -206,6 +206,10 @@ def create_match_card(set_data: dict, x: int = 0, y: int = 0, width: int = 360) 
         item[1].get("slotIndex") if item[1].get("slotIndex") is not None else item[0]
     ))
     slots = [slot for _, slot in ordered]
+    has_dq = any(
+        (((slot.get("standing") or {}).get("stats") or {}).get("score") or {}).get("value") in (-1, "-1")
+        for slot in slots
+    )
     state = str(set_data.get("state")).casefold()
     completed = state in {"3", "completed"}
     status = {"1": "Pending", "created": "Pending", "2": "In progress", "active": "In progress",
@@ -242,5 +246,9 @@ def create_match_card(set_data: dict, x: int = 0, y: int = 0, width: int = 360) 
         name_size = max(10, min(12, name_width // max(1, len(name))))
         text(name, 32, top + 30, name_size, "#f3f5fb" if entrant else "#aab6ce", name_width // name_size)
         score = (((slot.get("standing") or {}).get("stats") or {}).get("score") or {}).get("value")
+        if score == -1 or score == "-1":
+            score = "DQ"
+        elif winner and has_dq:
+            score = "W"
         text(score if score is not None else "—", width - 16, top + 30, 14, "#f6d54a" if winner else "#f3f5fb", 4, "end")
     return card

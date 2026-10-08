@@ -64,8 +64,26 @@ class PoolPagesView(discord.ui.DesignerView):
             f"attachment://pools-page-{self.page}.png",
             description=f"Pool standings, page {self.page} of {self.page_count}",
         )]
-        self.previous.disabled = self.page <= 1
-        self.next_page.disabled = self.page >= self.page_count
+        self.previous.disabled = self.is_finished() or self.page <= 1
+        self.next_page.disabled = self.is_finished() or self.page >= self.page_count
+
+    async def on_timeout(self):
+        self.stop()
+        async with self.lock:
+            self.update_buttons()
+            self.add_item(discord.ui.TextDisplay("Session expired. Run /bracket again to navigate."))
+            if self.parent is not None:
+                try:
+                    await self.parent.edit_original_response(view=self)
+                except discord.HTTPException:
+                    logger.warning("Could not disable expired pool controls", exc_info=True)
+
+    async def on_error(self, error, item, interaction):
+        logger.error("Pool navigation failed", exc_info=(type(error), error, error.__traceback__))
+        try:
+            await interaction.respond("Could not navigate this image. Run /bracket again.", ephemeral=True)
+        except discord.HTTPException:
+            logger.warning("Could not send pool navigation error", exc_info=True)
 
     async def previous_page(self, interaction):
         await self.change_page(interaction, -1)
@@ -80,9 +98,13 @@ class PoolPagesView(discord.ui.DesignerView):
         request_started = perf_counter()
         await interaction.response.defer()
         acknowledged = perf_counter()
+        self.parent = interaction
         async with self.lock:
             logger.info("Pool navigation: acknowledge=%.3fs queue=%.3fs",
                         acknowledged - request_started, perf_counter() - acknowledged)
+            if self.is_finished():
+                await interaction.followup.send("Session expired. Run /bracket again.", ephemeral=True)
+                return
             if config.config_store.get_active_event() != self.active_event:
                 await interaction.followup.send("The active event changed. Run /bracket again.", ephemeral=True)
                 return
@@ -103,6 +125,9 @@ class PoolPagesView(discord.ui.DesignerView):
             except (ValueError, RuntimeError):
                 logger.exception("Could not render pool page %s", page)
                 await interaction.followup.send("Could not generate this page. Please try again.", ephemeral=True)
+                return
+            if self.is_finished():
+                await interaction.followup.send("Session expired. Run /bracket again.", ephemeral=True)
                 return
             if config.config_store.get_active_event() != self.active_event:
                 await interaction.followup.send("The active event changed. Run /bracket again.", ephemeral=True)
@@ -229,6 +254,8 @@ class Bracket(commands.Cog):
         logger.info("Bracket image: group=%s render=%.3fs bytes=%s",
                      group_id, perf_counter() - render_started, len(png))
         view = PoolPagesView(summary, active_event.copy(), ctx.author.id, png) if show_pools else None
+        if view is not None:
+            view.parent = ctx.interaction
         attachment = discord.File(BytesIO(png), filename=filename)
         try:
             send_started = perf_counter()

@@ -1,3 +1,4 @@
+import logging
 import cogs
 import os # default module
 import config
@@ -15,6 +16,8 @@ async def hello(ctx: discord.ApplicationContext):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("cogs.bracket").setLevel(logging.INFO)
     config.bot.load_extension("cogs.admin")
     config.bot.load_extension("cogs.seeding")
     config.bot.load_extension("cogs.staff_help")

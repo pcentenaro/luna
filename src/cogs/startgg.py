@@ -803,6 +803,7 @@ class ReportConfirmationView(discord.ui.View):
             update_ready_match_check_message(
                 message=interaction.message,
                 channel=interaction.channel,
+                bot=interaction.client,
                 active_event=self.active_event,
                 report_message=report_message,
             )
@@ -990,6 +991,7 @@ class DQReportModal(discord.ui.Modal):
                 update_ready_match_check_message(
                     message=message,
                     channel=message.channel,
+                    bot=interaction.client,
                     active_event=self.report_view.active_event,
                     report_message=report_message,
                 )
@@ -1319,6 +1321,7 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
 async def update_ready_match_check_message(
     message,
     channel,
+    bot,
     active_event: dict,
     report_message: str,
 ):
@@ -1348,12 +1351,21 @@ async def update_ready_match_check_message(
     if generation != event_generation or not is_current_event(active_event):
         return
 
+    image_notice = ""
+    cog = bot.get_cog("Startgg")
+    if cog is not None:
+        failures = await cog.update_bracket_images(active_event)
+        if failures:
+            image_notice = "\n\nScore reported, but bracket images could not be updated. Retry publication from the admin panel."
+    if generation != event_generation or not is_current_event(active_event):
+        return
+
     if pinged_count:
-        await message.edit(content=f"{report_message}\n\nLuna pinged {pinged_count} ready match(es).")
+        await message.edit(content=f"{report_message}\n\nLuna pinged {pinged_count} ready match(es)." + image_notice)
         return
 
     await message.edit(
-        content=f"{report_message}\n\nNo new ready matches yet. Please wait for Luna's next ready match ping."
+        content=f"{report_message}\n\nNo new ready matches yet. Please wait for Luna's next ready match ping." + image_notice
     )
 
 

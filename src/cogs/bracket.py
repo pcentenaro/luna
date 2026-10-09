@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import re
+from hashlib import sha256
 from io import BytesIO
 from copy import deepcopy
 from time import perf_counter
@@ -168,6 +170,7 @@ class Bracket(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.publication_lock = asyncio.Lock()
+        self.published_image_hashes = {}
 
     async def publish_images(self, guild: discord.Guild) -> int:
         async with self.publication_lock:
@@ -202,25 +205,41 @@ class Bracket(commands.Cog):
             if not images:
                 raise ValueError("No pool or bracket images are available yet.")
             messages = store.get_bracket_image_messages(guild.id, event_id, channel_id)
+            updated = 0
             for image_key, svg in images.items():
+                # The sync clock alone must not trigger another image upload.
+                visible_svg = re.sub(r">(?:EVENT )?SYNCED \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC<", ">SYNCED<", svg)
+                fingerprint = sha256(visible_svg.encode("utf-8")).hexdigest()
+                cache_key = (guild.id, event_id, channel_id, image_key)
+                message_id = messages.get(image_key)
+                existing_message = None
+                if message_id is not None:
+                    try:
+                        existing_message = await channel.fetch_message(message_id)
+                    except discord.NotFound:
+                        pass
+                if existing_message is not None and self.published_image_hashes.get(cache_key) == (message_id, fingerprint):
+                    continue
                 png = await svg_to_png(svg)
                 if store.get_active_event() != active_event or store.get_bracket_image_channel_id(guild.id) != channel_id:
                     raise ValueError("The event or image channel changed. Publish again using the current settings.")
                 attachment = discord.File(BytesIO(png), filename=image_key.replace(":", "-") + ".png")
                 try:
-                    message_id = messages.get(image_key)
-                    if message_id is not None:
+                    if existing_message is not None:
                         try:
-                            existing_message = await channel.fetch_message(message_id)
                             await existing_message.edit(
                                 attachments=[], file=attachment, allowed_mentions=discord.AllowedMentions.none(),
                             )
-                            continue
                         except discord.NotFound:
+                            existing_message = None
                             attachment.close()
                             attachment = discord.File(BytesIO(png), filename=image_key.replace(":", "-") + ".png")
-                    message = await channel.send(file=attachment, allowed_mentions=discord.AllowedMentions.none())
-                    store.set_bracket_image_message(guild.id, event_id, channel_id, image_key, message.id)
+                    if existing_message is None:
+                        message = await channel.send(file=attachment, allowed_mentions=discord.AllowedMentions.none())
+                        message_id = message.id
+                        store.set_bracket_image_message(guild.id, event_id, channel_id, image_key, message_id)
+                    self.published_image_hashes[cache_key] = (message_id, fingerprint)
+                    updated += 1
                 finally:
                     attachment.close()
             # Keep old publications until all current images have been sent successfully.
@@ -232,7 +251,8 @@ class Bracket(commands.Cog):
                 except discord.NotFound:
                     pass
                 store.clear_bracket_image_message(guild.id, event_id, channel_id, image_key)
-            return len(images)
+                self.published_image_hashes.pop((guild.id, event_id, channel_id, image_key), None)
+            return updated
 
     @discord.slash_command(
         name="bracket",

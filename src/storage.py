@@ -36,6 +36,8 @@ class LinkStore:
             self.cursor.execute("ALTER TABLE links ADD COLUMN pgrs_player_name TEXT")
         if "pgrs_player_id" not in columns:
             self.cursor.execute("ALTER TABLE links ADD COLUMN pgrs_player_id TEXT")
+        if "account_from_japan" not in columns:
+            self.cursor.execute("ALTER TABLE links ADD COLUMN account_from_japan INTEGER NOT NULL DEFAULT 0")
         self.connection.commit()
 
     def set_startgg_link(
@@ -89,6 +91,13 @@ class LinkStore:
                 datetime.now(timezone.utc).isoformat(),
                 discord_user_id,
             ),
+        )
+        self.connection.commit()
+
+    def set_account_from_japan(self, discord_user_id: int, enabled: bool):
+        self.cursor.execute(
+            "UPDATE links SET account_from_japan = ?, updated_at = ? WHERE discord_user_id = ?",
+            (int(enabled), datetime.now(timezone.utc).isoformat(), discord_user_id),
         )
         self.connection.commit()
 

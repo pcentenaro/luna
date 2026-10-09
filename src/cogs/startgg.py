@@ -1003,30 +1003,45 @@ class DQReportModal(discord.ui.Modal):
         await interaction.followup.send("DQ reported.", ephemeral=True)
 
 
-class LinkStartggAccountModal(discord.ui.Modal):
+class LinkStartggAccountModal(discord.ui.DesignerModal):
     def __init__(self, user_id: int, existing_link: dict | None = None):
         super().__init__(title="Link start.gg account")
         self.user_id = user_id
-        self.add_item(
-            discord.ui.InputText(
-                label="Player ID or profile code",
-                placeholder="74b6cc6d or https://www.start.gg/user/74b6cc6d",
-                value=str(existing_link["startgg_player_id"]) if existing_link else None,
-                required=True,
-            )
+        self.player_reference = discord.ui.InputText(
+            placeholder="74b6cc6d or https://www.start.gg/user/74b6cc6d",
+            value=str(existing_link["startgg_player_id"]) if existing_link else None,
+            required=True,
         )
-        self.add_item(
-            discord.ui.InputText(
-                label="PGRS player name (optional)",
-                placeholder="Your name in the PGRS page",
-                value=existing_link["pgrs_player_name"] if existing_link else None,
-                required=False,
-                max_length=100,
-            )
+        self.pgrs_name = discord.ui.InputText(
+            placeholder="Your name in the PGRS page",
+            value=existing_link["pgrs_player_name"] if existing_link else None,
+            required=False,
+            max_length=100,
         )
         # py-cord 2.7.2 loses required=False in the InputText constructor.
-        self.children[-1].required = False
+        self.pgrs_name.required = False
+        account_from_japan = bool(existing_link and existing_link.get("account_from_japan"))
+        self.japan_account = discord.ui.Select(
+            options=[
+                discord.SelectOption(label="No", value="no", default=not account_from_japan),
+                discord.SelectOption(label="Yes", value="yes", default=account_from_japan),
+            ],
+            min_values=1,
+            max_values=1,
+            required=True,
+        )
+        self.add_item(discord.ui.Label("Player ID or profile code", self.player_reference))
+        self.add_item(discord.ui.Label("PGRS player name (optional)", self.pgrs_name))
+        self.add_item(discord.ui.Label(
+            "My account is from Japan",
+            self.japan_account,
+        ))
 
+    def to_dict(self):
+        payload = super().to_dict()
+        # py-cord 2.7.2 resets required=False when serializing a Label's InputText.
+        payload["components"][1]["component"]["required"] = False
+        return payload
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
@@ -1037,8 +1052,13 @@ class LinkStartggAccountModal(discord.ui.Modal):
             await interaction.response.send_message("STARTGG_API_KEY is not configured yet.", ephemeral=True)
             return
 
-        player_reference = self.children[0].value
-        pgrs_player_name = (self.children[1].value or "").strip() or None
+        selection = self.japan_account.values
+        if selection not in (["yes"], ["no"]):
+            await interaction.response.send_message("Please choose Yes or No for your account region.", ephemeral=True)
+            return
+        account_from_japan = selection == ["yes"]
+        player_reference = self.player_reference.value
+        pgrs_player_name = (self.pgrs_name.value or "").strip() or None
         await interaction.response.defer(ephemeral=True)
 
         try:
@@ -1061,6 +1081,7 @@ class LinkStartggAccountModal(discord.ui.Modal):
             prefix=player.get("prefix"),
         )
         config.link_store.set_pgrs_link(interaction.user.id, pgrs_player_name)
+        config.link_store.set_account_from_japan(interaction.user.id, account_from_japan)
         try:
             sync_result = await sync_participant_role(interaction.guild, interaction.user.id)
         except (StartGGError, PGRSError):
@@ -1069,10 +1090,9 @@ class LinkStartggAccountModal(discord.ui.Modal):
         if sync_result and sync_result["assigned"]:
             role_message = " Your tournament participant role was also assigned."
         pgrs_message = " PGRS player name saved." if pgrs_player_name else " No PGRS player name was saved."
-        await interaction.followup.send(
-            f"Linked your Discord account to {format_startgg_player(player)}.{pgrs_message}{role_message}",
-            ephemeral=True,
-        )
+        confirmation = f"Linked your Discord account to {format_startgg_player(player)}.{pgrs_message}{role_message}"
+        reminders = "disabled" if account_from_japan else "enabled"
+        await interaction.followup.send(f"{confirmation} PGRS reminders: {reminders}.", ephemeral=True)
 
 
 async def send_admin_ping_with_cooldown(view, interaction: discord.Interaction):

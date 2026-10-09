@@ -638,9 +638,10 @@ def build_pgrs_link_statuses(
                 reason = "ambiguous" if matches else "not found"
                 escaped_name = discord.utils.escape_markdown(pgrs_name)
                 statuses["unresolved"].append(f"**{startgg_name}** -> **{escaped_name}** ({reason})")
-                statuses["notifications"].append(
-                    f"<@{link['discord_user_id']}> — check your PGRS player name in `/link` and your PGRS registration."
-                )
+                if not link.get("account_from_japan"):
+                    statuses["notifications"].append(
+                        f"<@{link['discord_user_id']}> — check your PGRS player name in `/link` and your PGRS registration."
+                    )
 
         if entry:
             linked_pgrs_ids.add(str(entry["player_id"]))
@@ -652,14 +653,16 @@ def build_pgrs_link_statuses(
                 )
         elif attendee and pgrs_player_id:
             statuses["missing"].append(format_pgrs_status(startgg_name, pgrs_name or "Unknown", str(pgrs_player_id)))
-            statuses["notifications"].append(
-                f"<@{link['discord_user_id']}> — register for the tournament on PGRS."
-            )
+            if not link.get("account_from_japan"):
+                statuses["notifications"].append(
+                    f"<@{link['discord_user_id']}> — register for the tournament on PGRS."
+                )
         elif attendee and not pgrs_name:
             statuses["unnamed"].append(f"**{startgg_name}**")
-            statuses["notifications"].append(
-                f"<@{link['discord_user_id']}> — add your PGRS player name with `/link`."
-            )
+            if not link.get("account_from_japan"):
+                statuses["notifications"].append(
+                    f"<@{link['discord_user_id']}> — add your PGRS player name with `/link`."
+                )
 
     for entry in pgrs_entries:
         if str(entry["player_id"]) not in linked_pgrs_ids:

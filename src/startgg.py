@@ -373,6 +373,23 @@ class StartGGClient:
         )
         return data.get("set")
 
+    async def mark_set_in_progress(self, set_id: int) -> dict:
+        data = await self.query(
+            """
+            mutation MarkSetInProgress($setId: ID!) {
+              markSetInProgress(setId: $setId) {
+                id
+                state
+              }
+            }
+            """,
+            {"setId": set_id},
+        )
+        result = data.get("markSetInProgress")
+        if not isinstance(result, dict) or str(result.get("id")) != str(set_id) or str(result.get("state")).casefold() not in {"2", "active"}:
+            raise StartGGError(f"start.gg did not confirm that set {set_id} is in progress")
+        return result
+
     async def report_set(
         self,
         set_id: int,

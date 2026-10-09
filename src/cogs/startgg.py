@@ -632,8 +632,9 @@ def build_phase_group_links(active_event: dict, phase: dict, phase_groups: list[
 pending_report_user_ids_by_set: dict[int, set[int]] = {}
 pending_report_set_id_by_user: dict[int, int] = {}
 pinged_ready_set_ids: set[int] = set()
+pending_start_set_ids: set[int] = set()
 reopened_set_ids: set[int] = set()
-# ponytail: one lock coordinates sends and cache publication; split by event if multiple events become active.
+# One lock coordinates sends and cache publication; split by event if multiple events become active.
 match_announcement_lock = asyncio.Lock()
 pinged_waiting_players: set[tuple[int, int]] = set()
 announced_completed_phase_group_ids: set[int] = set()
@@ -652,6 +653,7 @@ def invalidate_event_state():
     pending_report_user_ids_by_set.clear()
     pending_report_set_id_by_user.clear()
     pinged_ready_set_ids.clear()
+    pending_start_set_ids.clear()
     reopened_set_ids.clear()
     pinged_waiting_players.clear()
     announced_completed_phase_group_ids.clear()
@@ -1278,6 +1280,7 @@ async def announce_ready_matches_from_cache(channel, active_event: dict, reping:
 
 
 async def announce_ready_matches_for_matches(channel, event_matches: list[dict], reping: bool = False, only_set_ids: set[int] | None = None) -> int:
+    global event_results_revision
     channel = get_event_announcement_channel(channel)
     generation = event_generation
     ready_matches = find_ready_matches_for_ping(event_matches)
@@ -1299,6 +1302,35 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
             return 0
         pinged_ready_set_ids.add(set_id)
         reopened_set_ids.discard(set_id)
+        if str(match["set"].get("state")).casefold() not in {"2", "active"}:
+            pending_start_set_ids.add(set_id)
+
+    pending_start_set_ids.intersection_update(int(match["set"]["id"]) for match in event_matches if is_reportable_set(match["set"]))
+    start_error = None
+    for match in event_matches:
+        if not is_real_set_id(match["set"]):
+            continue
+        set_id = int(match["set"]["id"])
+        if set_id not in pending_start_set_ids:
+            continue
+        if generation != event_generation:
+            return 0
+        if str(match["set"].get("state")).casefold() not in {"2", "active"}:
+            try:
+                if config.startgg_client is None:
+                    raise StartGGError("start.gg is not configured")
+                await config.startgg_client.mark_set_in_progress(set_id)
+            except StartGGError as error:
+                start_error = error
+                continue
+            if generation != event_generation:
+                return 0
+            event_results_revision += 1
+            for cached_match in event_cache.get("matches") or []:
+                if str(cached_match["set"].get("id")) == str(set_id) and is_pending_set(cached_match["set"]):
+                    cached_match["set"] = {**cached_match["set"], "state": 2}
+        pending_start_set_ids.discard(set_id)
+
 
     waiting_players = find_waiting_players_for_ping(event_matches, ready_matches)
     new_waiting_players = [
@@ -1317,6 +1349,8 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
             return 0
         pinged_waiting_players.add(waiting_player_key(waiting_player))
 
+    if start_error is not None:
+        raise StartGGError(f"Players were pinged, but some sets could not be started: {start_error}")
     return len(new_ready_matches)
 
 

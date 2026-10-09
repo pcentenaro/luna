@@ -35,6 +35,32 @@ class Admin(commands.Cog):
             view=AdminPanelView(),
         )
 
+    @commands.command(name="image")
+    @commands.guild_only()
+    async def publish_bracket_images(self, ctx: commands.Context):
+        if not is_luna_admin(ctx):
+            await ctx.send("Only Luna admins can publish bracket images.")
+            return
+        if ctx.guild is None:
+            await ctx.send("This action is only available in a server.")
+            return
+        cog = self.bot.get_cog("Bracket")
+        if cog is None:
+            await ctx.send("The bracket command is unavailable.")
+            return
+        try:
+            count = await cog.publish_images(ctx.guild)
+        except (ValueError, RuntimeError) as error:
+            await ctx.send(str(error))
+            return
+        except discord.HTTPException:
+            await ctx.send("Publication stopped because Discord rejected an image. Check channel permissions and retry; saved messages will be reused.")
+            return
+        except OSError:
+            await ctx.send("Could not save publication references. Check the bot storage and image channel before retrying.")
+            return
+        await ctx.send(f"Published or updated {count} bracket image(s).")
+
     @commands.command(name="ref")
     @commands.guild_only()
     async def refresh_participant_roles(self, ctx: commands.Context):

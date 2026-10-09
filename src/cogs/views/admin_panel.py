@@ -201,32 +201,6 @@ class ChannelSettingsView(discord.ui.View):
         self.add_item(EventAnnouncementChannelSelect())
         self.add_item(BracketImageChannelSelect())
 
-    @discord.ui.button(label="Publish bracket images", style=discord.ButtonStyle.primary, row=1)
-    async def publish_bracket_images(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if not is_luna_admin(interaction):
-            await interaction.response.send_message("Only Luna admins can publish bracket images.", ephemeral=True)
-            return
-        if interaction.guild is None:
-            await interaction.response.send_message("This action is only available in a server.", ephemeral=True)
-            return
-        cog = interaction.client.get_cog("Bracket")
-        if cog is None:
-            await interaction.response.send_message("The bracket command is unavailable.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            count = await cog.publish_images(interaction.guild)
-        except (ValueError, RuntimeError) as error:
-            await interaction.followup.send(str(error), ephemeral=True)
-            return
-        except discord.HTTPException:
-            await interaction.followup.send("Publication stopped because Discord rejected an image. Check channel permissions and retry; saved messages will be reused.", ephemeral=True)
-            return
-        except OSError:
-            await interaction.followup.send("Could not save publication references. Check the bot storage and image channel before retrying.", ephemeral=True)
-            return
-        await interaction.followup.send(f"Published or updated {count} bracket image(s).", ephemeral=True)
-
     @discord.ui.button(label="Clear ranking channel", style=discord.ButtonStyle.danger, row=1)
     async def clear_clues_ranking_channel(self, button: discord.ui.Button, interaction: discord.Interaction):
         if not is_luna_admin(interaction):

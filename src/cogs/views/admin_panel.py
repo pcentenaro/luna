@@ -770,12 +770,16 @@ class SetEventModal(discord.ui.Modal):
         )
         from cogs.startgg import invalidate_event_state, refresh_event_cache
         invalidate_event_state()
+        active_event = config.config_store.get_active_event()
         try:
-            await refresh_event_cache(config.config_store.get_active_event())
+            await refresh_event_cache(active_event)
         except StartGGError as error:
             cache_message = f" Event data could not be loaded: {error}. Use `/refresh_event` to retry."
         else:
             cache_message = " Event data loaded."
+            cog = interaction.client.get_cog("Startgg")
+            if cog is not None and await cog.update_bracket_images(active_event):
+                cache_message += " Bracket images could not be updated. Retry publication from the admin panel."
         try:
             sync_result = await sync_participant_role(interaction.guild)
         except (StartGGError, PGRSError) as error:

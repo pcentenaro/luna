@@ -33,6 +33,8 @@ class Startgg(commands.Cog):
             await refresh_event_cache(active_event)
         except StartGGError as error:
             logging.getLogger(__name__).warning("Could not load the active event on startup: %s", error)
+            return
+        await self.update_bracket_images(active_event)
 
     def configure_event_sync(self):
         seconds = config.config_store.get_event_refresh_interval()

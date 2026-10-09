@@ -395,6 +395,16 @@ class ConfigStore:
         messages[image_key] = str(message_id)
         self._save(data)
 
+    def clear_bracket_image_message(self, guild_id: int, event_id: int, channel_id: int,
+                                    image_key: str) -> bool:
+        data = self._load()
+        messages = (data.get("bracket_image_messages", {})
+                    .get(str(guild_id), {}).get(str(event_id), {}).get(str(channel_id), {}))
+        if messages.pop(image_key, None) is None:
+            return False
+        self._save(data)
+        return True
+
     def get_completed_group_announcements(self, event_id: int) -> set[int]:
         return set(self._load().get("completed_group_announcements", {}).get(str(event_id), []))
 

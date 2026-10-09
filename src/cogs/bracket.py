@@ -179,8 +179,8 @@ class Bracket(commands.Cog):
                 raise ValueError("Configure an available bracket image channel first.")
             permissions = channel.permissions_for(guild.me) if guild.me else None
             if permissions is None or not (permissions.view_channel and permissions.send_messages
-                                            and permissions.attach_files and permissions.embed_links):
-                raise ValueError("Luna needs View Channel, Send Messages, Embed Links and Attach Files in that channel.")
+                                            and permissions.attach_files and permissions.embed_links and permissions.read_message_history):
+                raise ValueError("Luna needs View Channel, Send Messages, Embed Links, Attach Files and Read Message History in that channel.")
             snapshot = deepcopy(event_cache)
             if active_event is None or snapshot.get("event_id") != active_event["event_id"]:
                 raise ValueError("Event cache is not ready. Refresh the active event first.")
@@ -190,10 +190,12 @@ class Bracket(commands.Cog):
             if summary["pools"]:
                 pages = await asyncio.to_thread(create_pools_svg_pages, summary)
                 images.update((f"pools:{page}", svg) for page, svg in enumerate(pages, 1))
+            current_keys = set(images)
             for phase in snapshot.get("phases", []):
                 for group in snapshot.get("phase_groups", {}).get(int(phase["id"]), []):
                     if is_pool_group(phase, group):
                         continue
+                    current_keys.add(f"bracket:{group['id']}")
                     data = build_bracket_data(snapshot, event_id, int(group["id"]))
                     if data["sets"]:
                         images[f"bracket:{group['id']}"] = await asyncio.to_thread(create_bracket_svg, data)
@@ -209,7 +211,8 @@ class Bracket(commands.Cog):
                     message_id = messages.get(image_key)
                     if message_id is not None:
                         try:
-                            await channel.get_partial_message(message_id).edit(
+                            existing_message = await channel.fetch_message(message_id)
+                            await existing_message.edit(
                                 attachments=[], file=attachment, allowed_mentions=discord.AllowedMentions.none(),
                             )
                             continue
@@ -220,6 +223,15 @@ class Bracket(commands.Cog):
                     store.set_bracket_image_message(guild.id, event_id, channel_id, image_key, message.id)
                 finally:
                     attachment.close()
+            # Keep old publications until all current images have been sent successfully.
+            for image_key in messages.keys() - current_keys:
+                if store.get_active_event() != active_event or store.get_bracket_image_channel_id(guild.id) != channel_id:
+                    raise ValueError("The event or image channel changed. Publish again using the current settings.")
+                try:
+                    await channel.get_partial_message(messages[image_key]).delete()
+                except discord.NotFound:
+                    pass
+                store.clear_bracket_image_message(guild.id, event_id, channel_id, image_key)
             return len(images)
 
     @discord.slash_command(

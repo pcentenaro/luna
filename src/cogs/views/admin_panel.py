@@ -399,8 +399,8 @@ class BracketImageChannelSelect(discord.ui.Select):
             return
         channel = self.values[0]
         permissions = channel.permissions_for(interaction.guild.me) if interaction.guild.me else None
-        if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links and permissions.attach_files):
-            await interaction.response.send_message("Luna needs View Channel, Send Messages Embed Links and Attach Files in that channel.", ephemeral=True)
+        if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links and permissions.attach_files and permissions.read_message_history):
+            await interaction.response.send_message("Luna needs View Channel, Send Messages, Embed Links, Attach Files and Read Message History in that channel.", ephemeral=True)
             return
         config.config_store.set_bracket_image_channel_id(interaction.guild.id, channel.id)
         await refresh_channel_settings_response(interaction)

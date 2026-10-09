@@ -130,12 +130,22 @@ class Startgg(commands.Cog):
             await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
             return
 
-        await ctx.send_modal(
-            LinkStartggAccountModal(
-                ctx.author.id,
-                config.link_store.get_startgg_link(ctx.author.id),
-            )
-        )
+        existing_link = config.link_store.get_startgg_link(ctx.author.id)
+        profile_code = None
+        if existing_link:
+            try:
+                player = await asyncio.wait_for(
+                    config.startgg_client.get_player(int(existing_link["startgg_player_id"])),
+                    timeout=2,
+                )
+            except (StartGGError, asyncio.TimeoutError):
+                await ctx.respond("Could not load your start.gg profile. Please try /link again.", ephemeral=True)
+                return
+            profile_slug = ((player or {}).get("user") or {}).get("slug")
+            if profile_slug:
+                profile_code = profile_slug.rstrip("/").split("/")[-1]
+
+        await ctx.send_modal(LinkStartggAccountModal(ctx.author.id, existing_link, profile_code))
 
 
     @startgg.command(
@@ -1004,12 +1014,13 @@ class DQReportModal(discord.ui.Modal):
 
 
 class LinkStartggAccountModal(discord.ui.DesignerModal):
-    def __init__(self, user_id: int, existing_link: dict | None = None):
+    def __init__(self, user_id: int, existing_link: dict | None = None, profile_code: str | None = None):
         super().__init__(title="Link start.gg account")
         self.user_id = user_id
+        self.linked_player_id = str(existing_link["startgg_player_id"]) if existing_link else None
         self.player_reference = discord.ui.InputText(
             placeholder="74b6cc6d or https://www.start.gg/user/74b6cc6d",
-            value=str(existing_link["startgg_player_id"]) if existing_link else None,
+            value=profile_code,
             required=True,
         )
         self.pgrs_name = discord.ui.InputText(
@@ -1030,7 +1041,7 @@ class LinkStartggAccountModal(discord.ui.DesignerModal):
             max_values=1,
             required=True,
         )
-        self.add_item(discord.ui.Label("Player ID or profile code", self.player_reference))
+        self.add_item(discord.ui.Label("Profile code or URL", self.player_reference))
         self.add_item(discord.ui.Label("PGRS player name (optional)", self.pgrs_name))
         self.add_item(discord.ui.Label(
             "My account is from Japan",
@@ -1072,6 +1083,12 @@ class LinkStartggAccountModal(discord.ui.DesignerModal):
                 return
         except StartGGError as error:
             await interaction.followup.send(f"Could not verify that start.gg profile: {error}", ephemeral=True)
+            return
+
+        current_link = config.link_store.get_startgg_link(self.user_id)
+        current_player_id = str(current_link["startgg_player_id"]) if current_link else None
+        if current_player_id != self.linked_player_id:
+            await interaction.followup.send("Your linked account changed. Please open /link again.", ephemeral=True)
             return
 
         config.link_store.set_startgg_link(

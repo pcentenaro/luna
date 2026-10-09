@@ -63,6 +63,7 @@ class StartGGClient:
                 id
                 gamerTag
                 prefix
+                user { slug }
               }
             }
             """,

@@ -75,6 +75,25 @@ class Startgg(commands.Cog):
                 except (StartGGError, discord.HTTPException) as error:
                     logging.getLogger(__name__).warning("Could not publish event announcements in channel %s: %s", channel_id, error)
 
+        await self.update_bracket_images(active_event)
+
+    async def update_bracket_images(self, active_event: dict) -> int:
+        bracket = self.bot.get_cog("Bracket")
+        if bracket is None:
+            return 0
+        failures = 0
+        for guild in self.bot.guilds:
+            if not is_current_event(active_event):
+                break
+            if config.config_store.get_bracket_image_channel_id(guild.id) is None:
+                continue
+            try:
+                await bracket.publish_images(guild)
+            except (ValueError, RuntimeError, OSError, discord.HTTPException):
+                failures += 1
+                logging.getLogger(__name__).exception("Could not update bracket images in guild %s", guild.id)
+        return failures
+
     startgg = discord.SlashCommandGroup("startgg")
 
 
@@ -519,9 +538,11 @@ class Startgg(commands.Cog):
         if pinged_count is None or completed_count is None:
             await ctx.respond("The active event changed. Run the command again.", ephemeral=True)
             return
+        image_failures = await self.update_bracket_images(active_event)
+        image_notice = " Image updates failed; check Luna's logs and retry publication." if image_failures else ""
         await ctx.respond(
             f"Refreshed {active_event['event_name']}: {len(matches)} reportable set(s) cached. "
-            f"Announced {pinged_count} reopened match(es) and {completed_count} completed group(s).",
+            f"Announced {pinged_count} reopened match(es) and {completed_count} completed group(s)." + image_notice,
             ephemeral=True,
         )
 

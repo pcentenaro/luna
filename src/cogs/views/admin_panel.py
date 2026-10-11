@@ -738,6 +738,7 @@ class SetEventModal(discord.ui.Modal):
             await interaction.followup.send(f"No start.gg event was found for `{full_event_slug}`.", ephemeral=True)
             return
 
+        previous_event = config.config_store.get_active_event()
         config.config_store.set_active_event(
             tournament_slug=tournament_slug,
             event_slug=full_event_slug,
@@ -746,8 +747,9 @@ class SetEventModal(discord.ui.Modal):
             pgrs_competition_id=pgrs_competition_id,
         )
         from cogs.startgg import invalidate_event_state, refresh_event_cache
-        invalidate_event_state()
         active_event = config.config_store.get_active_event()
+        if previous_event != active_event:
+            invalidate_event_state()
         try:
             await refresh_event_cache(active_event)
         except StartGGError as error:

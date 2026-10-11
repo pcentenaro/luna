@@ -177,13 +177,22 @@ class Bracket(commands.Cog):
             store = config.config_store
             active_event = store.get_active_event()
             channel_id = store.get_bracket_image_channel_id(guild.id)
-            channel = guild.get_channel(channel_id) if channel_id else None
+            channel = guild.get_channel_or_thread(channel_id) if channel_id else None
+            if channel is None and channel_id:
+                try:
+                    channel = await guild.fetch_channel(channel_id)
+                except discord.NotFound:
+                    raise ValueError("The bracket image channel or thread was deleted. Configure another destination.") from None
             if channel is None:
                 raise ValueError("Configure an available bracket image channel first.")
             permissions = channel.permissions_for(guild.me) if guild.me else None
-            if permissions is None or not (permissions.view_channel and permissions.send_messages
+            is_thread = isinstance(channel, discord.Thread)
+            can_send = permissions and (permissions.send_messages_in_threads if is_thread else permissions.send_messages)
+            if is_thread and channel.locked:
+                raise ValueError("The bracket image thread is locked. Unlock it before publishing.")
+            if permissions is None or not (permissions.view_channel and can_send
                                             and permissions.attach_files and permissions.embed_links and permissions.read_message_history):
-                raise ValueError("Luna needs View Channel, Send Messages, Embed Links, Attach Files and Read Message History in that channel.")
+                raise ValueError("Luna needs View Channel, Send Messages (Send Messages in Threads for a thread), Embed Links, Attach Files and Read Message History in that destination.")
             snapshot = deepcopy(event_cache)
             if active_event is None or snapshot.get("event_id") != active_event["event_id"]:
                 raise ValueError("Event cache is not ready. Refresh the active event first.")

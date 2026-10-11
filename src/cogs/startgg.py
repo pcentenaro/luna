@@ -67,9 +67,10 @@ class Startgg(commands.Cog):
             guild = self.bot.get_guild(guild_id)
             if guild is None:
                 continue
-            channel = guild.get_channel(channel_id)
-            if channel is None:
-                logging.getLogger(__name__).warning("Event announcement channel %s is missing in guild %s", channel_id, guild_id)
+            try:
+                channel = guild.get_channel_or_thread(channel_id) or await guild.fetch_channel(channel_id)
+            except discord.HTTPException as error:
+                logging.getLogger(__name__).warning("Could not load event announcement destination %s: %s", channel_id, error)
                 continue
             for announce in (announce_ready_matches_from_cache, announce_completed_phase_groups_from_cache):
                 try:
@@ -1310,19 +1311,24 @@ def mark_cached_set_completed(active_event: dict, set_id: int, winner_id: int):
             return
 
 
-def get_event_announcement_channel(channel):
+async def get_event_announcement_channel(channel):
     guild = getattr(channel, "guild", None)
     if guild is None:
         return channel
     channel_id = config.config_store.get_event_announcement_channel_id(guild.id)
     if channel_id is None:
         return channel
-    destination = guild.get_channel(channel_id)
+    destination = channel if getattr(channel, "id", None) == channel_id else guild.get_channel_or_thread(channel_id)
     if destination is None:
-        raise StartGGError("The event announcement channel is missing. Update Channel settings in the admin panel.")
+        try:
+            destination = await guild.fetch_channel(channel_id)
+        except discord.HTTPException as error:
+            raise StartGGError("The event announcement destination is inaccessible. Check Channel settings and permissions.") from error
     permissions = destination.permissions_for(guild.me) if guild.me else None
-    if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
-        raise StartGGError("Luna needs View Channel, Send Messages and Embed Links in the event announcement channel.")
+    is_thread = isinstance(destination, discord.Thread)
+    can_send = permissions and (permissions.send_messages_in_threads if is_thread else permissions.send_messages)
+    if (is_thread and destination.locked) or permissions is None or not (permissions.view_channel and can_send and permissions.embed_links):
+        raise StartGGError("Luna needs View Channel, Send Messages (Send Messages in Threads for a post) and Embed Links in an unlocked event destination.")
     return destination
 
 
@@ -1350,7 +1356,7 @@ async def announce_ready_matches_from_cache(channel, active_event: dict, reping:
 
 async def announce_ready_matches_for_matches(channel, event_matches: list[dict], reping: bool = False, only_set_ids: set[int] | None = None) -> int:
     global event_results_revision
-    channel = get_event_announcement_channel(channel)
+    channel = await get_event_announcement_channel(channel)
     generation = event_generation
     ready_matches = find_ready_matches_for_ping(event_matches)
     new_ready_matches = [
@@ -1477,7 +1483,7 @@ async def update_ready_match_check_message(
 
 
 async def announce_completed_phase_groups_from_cache(channel, active_event: dict) -> int | None:
-    channel = get_event_announcement_channel(channel)
+    channel = await get_event_announcement_channel(channel)
     generation = event_generation
     async with match_announcement_lock:
         if generation != event_generation or not is_current_event(active_event):

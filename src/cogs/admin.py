@@ -18,6 +18,7 @@ class Admin(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.notification_cooldown = commands.CooldownMapping.from_cooldown(1, 300, commands.BucketType.guild)
 
     admin = discord.SlashCommandGroup("admin")
 
@@ -34,6 +35,32 @@ class Admin(commands.Cog):
             embed=build_admin_panel_embed(ctx.guild),
             view=AdminPanelView(),
         )
+
+    @commands.command(name="image")
+    @commands.guild_only()
+    async def publish_bracket_images(self, ctx: commands.Context):
+        if not is_luna_admin(ctx):
+            await ctx.send("Only Luna admins can publish bracket images.")
+            return
+        if ctx.guild is None:
+            await ctx.send("This action is only available in a server.")
+            return
+        cog = self.bot.get_cog("Bracket")
+        if cog is None:
+            await ctx.send("The bracket command is unavailable.")
+            return
+        try:
+            count = await cog.publish_images(ctx.guild)
+        except (ValueError, RuntimeError) as error:
+            await ctx.send(str(error))
+            return
+        except discord.HTTPException:
+            await ctx.send("Publication stopped because Discord rejected an image. Check channel permissions and retry; saved messages will be reused.")
+            return
+        except OSError:
+            await ctx.send("Could not save publication references. Check the bot storage and image channel before retrying.")
+            return
+        await ctx.send(f"Published or updated {count} bracket image(s).")
 
     @commands.command(name="ref")
     @commands.guild_only()
@@ -67,6 +94,11 @@ class Admin(commands.Cog):
             return
         if config.startgg_client is None:
             await ctx.send("STARTGG_API_KEY is not configured yet.")
+            return
+
+        retry_after = self.notification_cooldown.get_bucket(ctx.message).update_rate_limit()
+        if retry_after:
+            await ctx.send(f"Registration reminders are on cooldown. Try again in {int(retry_after) + 1} seconds.")
             return
 
         try:

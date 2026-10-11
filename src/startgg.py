@@ -19,15 +19,19 @@ class StartGGClient:
         }
         payload = {"query": query, "variables": variables or {}}
 
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.post(STARTGG_API_URL, json=payload) as response:
-                data = await response.json(content_type=None)
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(STARTGG_API_URL, json=payload) as response:
+                    response.raise_for_status()
+                    data = await response.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as error:
+            raise StartGGError("Could not read a valid response from start.gg") from error
 
-        if "errors" in data:
-            message = data["errors"][0].get("message", "Unknown start.gg error")
-            raise StartGGError(message)
-
-        if "data" not in data:
+        if not isinstance(data, dict):
+            raise StartGGError("start.gg returned an unexpected response")
+        if data.get("errors"):
+            raise StartGGError("start.gg returned GraphQL errors: " + str(data["errors"]))
+        if not isinstance(data.get("data"), dict):
             raise StartGGError("start.gg returned an unexpected response")
 
         return data["data"]
@@ -59,6 +63,7 @@ class StartGGClient:
                 id
                 gamerTag
                 prefix
+                user { slug }
               }
             }
             """,
@@ -162,107 +167,172 @@ class StartGGClient:
             {"eventId": event_id},
         )
         event = data.get("event")
-        return event.get("phases", []) if event else []
+        if not isinstance(event, dict) or not isinstance(event.get("phases"), list):
+            raise StartGGError("start.gg did not return phases for the requested event")
+        return event["phases"]
 
     async def get_phase_groups(self, phase_id: int) -> list[dict]:
-        data = await self.query(
-            """
-            query PhaseGroups($phaseId: ID!) {
-              phase(id: $phaseId) {
-                phaseGroups(query: {perPage: 50}) {
-                  nodes {
-                    id
-                    bracketType
-                    displayIdentifier
-                    state
-                    wave {
-                      identifier
+        results = []
+        page = 1
+        while True:
+            data = await self.query(
+                """
+                query PhaseGroups($phaseId: ID!, $page: Int!) {
+                  phase(id: $phaseId) {
+                    phaseGroups(query: {page: $page, perPage: 50}) {
+                      pageInfo {
+                        totalPages
+                      }
+                      nodes {
+                        id
+                        bracketType
+                        displayIdentifier
+                        state
+                        wave {
+                          identifier
+                        }
+                      }
                     }
                   }
                 }
-              }
-            }
-            """,
-            {"phaseId": phase_id},
-        )
-        phase = data.get("phase")
-        phase_groups = phase.get("phaseGroups", {}) if phase else {}
-        return phase_groups.get("nodes", [])
+                """,
+                {"phaseId": phase_id, "page": page},
+            )
+            parent = data.get("phase")
+            if not isinstance(parent, dict):
+                raise StartGGError("start.gg did not return the requested phase")
+
+            connection = parent.get("phaseGroups")
+            if not isinstance(connection, dict):
+                raise StartGGError("start.gg did not return phaseGroups for the requested phase")
+            total_pages = (connection.get("pageInfo") or {}).get("totalPages")
+            nodes = connection.get("nodes")
+            if not isinstance(total_pages, int) or total_pages < 0 or not isinstance(nodes, list):
+                raise StartGGError("start.gg returned invalid phaseGroups pagination data")
+            if not nodes and page < total_pages:
+                raise StartGGError("start.gg returned an empty page before the end of phaseGroups")
+            results.extend(nodes)
+            if page >= total_pages:
+                return results
+            page += 1
 
     async def get_phase_group_sets(self, phase_group_id: int) -> list[dict]:
-        data = await self.query(
-            """
-            query PhaseGroupSets($phaseGroupId: ID!) {
-              phaseGroup(id: $phaseGroupId) {
-                sets(page: 1, perPage: 50) {
-                  nodes {
-                    id
-                    fullRoundText
-                    round
-                    state
-                    winnerId
-                    slots {
-                      prereqId
-                      prereqPlacement
-                      prereqType
-                      slotIndex
-                      standing {
-                        stats {
-                          score {
-                            value
-                          }
-                        }
+        results = []
+        page = 1
+        while True:
+            data = await self.query(
+                """
+                query PhaseGroupSets($phaseGroupId: ID!, $page: Int!) {
+                  phaseGroup(id: $phaseGroupId) {
+                    sets(page: $page, perPage: 50) {
+                      pageInfo {
+                        totalPages
                       }
-                      entrant {
+                      nodes {
                         id
-                        name
-                        participants {
-                          id
-                          gamerTag
-                          player {
+                        identifier
+                        fullRoundText
+                        round
+                        state
+                        winnerId
+                        slots(includeByes: true) {
+                          prereqId
+                          prereqPlacement
+                          prereqType
+                          slotIndex
+                          seed {
                             id
+                            seedNum
+                            isBye
+                          }
+                          standing {
+                            stats {
+                              score {
+                                value
+                              }
+                            }
+                          }
+                          entrant {
+                            id
+                            name
+                            participants {
+                              id
+                              gamerTag
+                              player {
+                                id
+                              }
+                            }
                           }
                         }
                       }
                     }
                   }
                 }
-              }
-            }
-            """,
-            {"phaseGroupId": phase_group_id},
-        )
-        phase_group = data.get("phaseGroup")
-        sets = phase_group.get("sets", {}) if phase_group else {}
-        return sets.get("nodes", [])
+                """,
+                {"phaseGroupId": phase_group_id, "page": page},
+            )
+            parent = data.get("phaseGroup")
+            if not isinstance(parent, dict):
+                raise StartGGError("start.gg did not return the requested phaseGroup")
+
+            connection = parent.get("sets")
+            if not isinstance(connection, dict):
+                raise StartGGError("start.gg did not return sets for the requested phaseGroup")
+            total_pages = (connection.get("pageInfo") or {}).get("totalPages")
+            nodes = connection.get("nodes")
+            if not isinstance(total_pages, int) or total_pages < 0 or not isinstance(nodes, list):
+                raise StartGGError("start.gg returned invalid sets pagination data")
+            if not nodes and page < total_pages:
+                raise StartGGError("start.gg returned an empty page before the end of sets")
+            results.extend(nodes)
+            if page >= total_pages:
+                return results
+            page += 1
 
     async def get_phase_group_standings(self, phase_group_id: int) -> list[dict]:
-        data = await self.query(
-            """
-            query PhaseGroupStandings($phaseGroupId: ID!) {
-              phaseGroup(id: $phaseGroupId) {
-                standings(query: {page: 1, perPage: 100}) {
-                  nodes {
-                    placement
-                    entrant {
-                      id
-                      name
-                      participants {
-                        player {
+        results = []
+        page = 1
+        while True:
+            data = await self.query(
+                """
+                query PhaseGroupStandings($phaseGroupId: ID!, $page: Int!) {
+                  phaseGroup(id: $phaseGroupId) {
+                    standings(query: {page: $page, perPage: 100}) {
+                      pageInfo { totalPages }
+                      nodes {
+                        placement
+                        entrant {
                           id
+                          name
+                          participants {
+                            player {
+                              id
+                            }
+                          }
                         }
                       }
                     }
                   }
                 }
-              }
-            }
-            """,
-            {"phaseGroupId": phase_group_id},
-        )
-        phase_group = data.get("phaseGroup")
-        standings = phase_group.get("standings", {}) if phase_group else {}
-        return standings.get("nodes", [])
+                """,
+                {"phaseGroupId": phase_group_id, "page": page},
+            )
+            group = data.get("phaseGroup")
+            connection = group.get("standings") if isinstance(group, dict) else None
+            if not isinstance(connection, dict):
+                raise StartGGError("start.gg did not return standings for the requested group")
+            nodes = connection.get("nodes")
+            total_pages = (connection.get("pageInfo") or {}).get("totalPages")
+            if (not isinstance(nodes, list) or type(total_pages) is not int or total_pages < 0
+                    or any(not isinstance(row, dict) for row in nodes)):
+                raise StartGGError("start.gg returned invalid standings pagination data")
+            if not nodes and page < total_pages:
+                raise StartGGError("start.gg returned an empty page before the end of standings")
+            results.extend(nodes)
+            if page >= total_pages:
+                return results
+            page += 1
+
 
     async def get_set(self, set_id: int) -> dict | None:
         data = await self.query(
@@ -303,6 +373,23 @@ class StartGGClient:
             {"setId": set_id},
         )
         return data.get("set")
+
+    async def mark_set_in_progress(self, set_id: int) -> dict:
+        data = await self.query(
+            """
+            mutation MarkSetInProgress($setId: ID!) {
+              markSetInProgress(setId: $setId) {
+                id
+                state
+              }
+            }
+            """,
+            {"setId": set_id},
+        )
+        result = data.get("markSetInProgress")
+        if not isinstance(result, dict) or str(result.get("id")) != str(set_id) or str(result.get("state")).casefold() not in {"2", "active"}:
+            raise StartGGError(f"start.gg did not confirm that set {set_id} is in progress")
+        return result
 
     async def report_set(
         self,

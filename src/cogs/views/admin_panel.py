@@ -47,6 +47,8 @@ class AdminPanelView(discord.ui.View):
             return
 
         deleted = config.config_store.clear_active_event()
+        from cogs.startgg import invalidate_event_state
+        invalidate_event_state()
         await refresh_admin_panel(interaction)
         if deleted:
             await interaction.followup.send(
@@ -77,6 +79,13 @@ class AdminPanelView(discord.ui.View):
 
         display_name = format_user_display_name(user)
         await interaction.followup.send(f"Connected to start.gg as {display_name}.", ephemeral=True)
+
+    @discord.ui.button(label="Event refresh", style=discord.ButtonStyle.secondary, row=0)
+    async def event_refresh(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can change event synchronization.", ephemeral=True)
+            return
+        await interaction.response.send_modal(SetEventRefreshModal())
 
     @discord.ui.button(label="Set admin role", style=discord.ButtonStyle.primary, row=1)
     async def set_admin_role(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -189,6 +198,8 @@ class ChannelSettingsView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
         self.add_item(LeaderboardChannelSelect())
+        self.add_item(EventAnnouncementChannelSelect())
+        self.add_item(BracketImageChannelSelect())
 
     @discord.ui.button(label="Clear ranking channel", style=discord.ButtonStyle.danger, row=1)
     async def clear_clues_ranking_channel(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -202,6 +213,34 @@ class ChannelSettingsView(discord.ui.View):
         deleted = config.clues_store.clear_leaderboard_channel_id(interaction.guild.id)
         await refresh_channel_settings_response(interaction)
         message = "Guess the Clues ranking channel cleared." if deleted else "No ranking channel was configured."
+        await interaction.followup.send(message, ephemeral=True)
+
+
+    @discord.ui.button(label="Clear event channel", style=discord.ButtonStyle.danger, row=3)
+    async def clear_event_channel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can clear the event channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+        deleted = config.config_store.clear_event_announcement_channel_id(interaction.guild.id)
+        await refresh_channel_settings_response(interaction)
+        message = "Event announcement channel cleared." if deleted else "No event channel was configured."
+        await interaction.followup.send(message, ephemeral=True)
+
+
+    @discord.ui.button(label="Clear image channel", style=discord.ButtonStyle.danger, row=3)
+    async def clear_image_channel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can clear the image channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+        deleted = config.config_store.clear_bracket_image_channel_id(interaction.guild.id)
+        await refresh_channel_settings_response(interaction)
+        message = "Bracket image channel cleared." if deleted else "No image channel was configured."
         await interaction.followup.send(message, ephemeral=True)
 
 
@@ -288,6 +327,60 @@ class LeaderboardChannelSelect(discord.ui.Select):
         await interaction.followup.send(f"Guess the Clues rankings will be posted in {channel.mention}.", ephemeral=True)
 
 
+class EventAnnouncementChannelSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            select_type=discord.ComponentType.channel_select,
+            custom_id="admin:event_announcement_channel",
+            placeholder="Choose the event announcement channel",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the event channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+        channel = self.values[0]
+        permissions = channel.permissions_for(interaction.guild.me) if interaction.guild.me else None
+        if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
+            await interaction.response.send_message("Luna needs View Channel, Send Messages and Embed Links in that channel.", ephemeral=True)
+            return
+        config.config_store.set_event_announcement_channel_id(interaction.guild.id, channel.id)
+        await refresh_channel_settings_response(interaction)
+        await interaction.followup.send(f"Event announcements will be posted in {channel.mention}.", ephemeral=True)
+
+
+class BracketImageChannelSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            select_type=discord.ComponentType.channel_select,
+            custom_id="admin:bracket_image_channel",
+            placeholder="Choose the bracket image channel",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            row=4,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can set the image channel.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("This setting is only available in a server.", ephemeral=True)
+            return
+        channel = self.values[0]
+        permissions = channel.permissions_for(interaction.guild.me) if interaction.guild.me else None
+        if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links and permissions.attach_files and permissions.read_message_history):
+            await interaction.response.send_message("Luna needs View Channel, Send Messages, Embed Links, Attach Files and Read Message History in that channel.", ephemeral=True)
+            return
+        config.config_store.set_bracket_image_channel_id(interaction.guild.id, channel.id)
+        await refresh_channel_settings_response(interaction)
+        await interaction.followup.send(f"Bracket image channel set to {channel.mention}.", ephemeral=True)
+
+
 def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
     leaderboard_channel_id = config.clues_store.get_leaderboard_channel_id(guild.id)
     leaderboard_channel_value = "Not configured"
@@ -301,6 +394,18 @@ def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
         color=discord.Color.gold(),
     )
     embed.add_field(name="Guess the Clues ranking", value=leaderboard_channel_value)
+    event_channel_id = config.config_store.get_event_announcement_channel_id(guild.id)
+    event_channel = guild.get_channel(event_channel_id) if event_channel_id else None
+    event_channel_value = event_channel.mention if event_channel else (
+        f"Missing channel ID `{event_channel_id}`" if event_channel_id else "Not configured (uses the command channel)"
+    )
+    embed.add_field(name="Event announcements", value=event_channel_value)
+    image_channel_id = config.config_store.get_bracket_image_channel_id(guild.id)
+    image_channel = guild.get_channel(image_channel_id) if image_channel_id else None
+    image_channel_value = image_channel.mention if image_channel else (
+        f"Missing channel ID `{image_channel_id}`" if image_channel_id else "Not configured"
+    )
+    embed.add_field(name="Bracket images", value=image_channel_value)
     return embed
 
 
@@ -342,6 +447,12 @@ def build_admin_panel_embed(guild: discord.Guild | None) -> discord.Embed:
     embed.add_field(name="Admin role", value=admin_role_value, inline=True)
     embed.add_field(name="Participant role", value=participant_role_value, inline=True)
     embed.add_field(name="Start.gg", value=startgg_value, inline=True)
+    refresh_seconds = config.config_store.get_event_refresh_interval()
+    embed.add_field(
+        name="Event refresh",
+        value=f"Every {refresh_seconds} seconds" if refresh_seconds else "Manual only",
+        inline=True,
+    )
     embed.add_field(
         name="Score targets",
         value=(
@@ -501,9 +612,10 @@ def build_pgrs_link_statuses(
                 reason = "ambiguous" if matches else "not found"
                 escaped_name = discord.utils.escape_markdown(pgrs_name)
                 statuses["unresolved"].append(f"**{startgg_name}** -> **{escaped_name}** ({reason})")
-                statuses["notifications"].append(
-                    f"<@{link['discord_user_id']}> — check your PGRS player name in `/link` and your PGRS registration."
-                )
+                if not link.get("account_from_japan"):
+                    statuses["notifications"].append(
+                        f"<@{link['discord_user_id']}> — check your PGRS player name in `/link` and your PGRS registration."
+                    )
 
         if entry:
             linked_pgrs_ids.add(str(entry["player_id"]))
@@ -515,14 +627,16 @@ def build_pgrs_link_statuses(
                 )
         elif attendee and pgrs_player_id:
             statuses["missing"].append(format_pgrs_status(startgg_name, pgrs_name or "Unknown", str(pgrs_player_id)))
-            statuses["notifications"].append(
-                f"<@{link['discord_user_id']}> — register for the tournament on PGRS."
-            )
+            if not link.get("account_from_japan"):
+                statuses["notifications"].append(
+                    f"<@{link['discord_user_id']}> — register for the tournament on PGRS."
+                )
         elif attendee and not pgrs_name:
             statuses["unnamed"].append(f"**{startgg_name}**")
-            statuses["notifications"].append(
-                f"<@{link['discord_user_id']}> — add your PGRS player name with `/link`."
-            )
+            if not link.get("account_from_japan"):
+                statuses["notifications"].append(
+                    f"<@{link['discord_user_id']}> — add your PGRS player name with `/link`."
+                )
 
     for entry in pgrs_entries:
         if str(entry["player_id"]) not in linked_pgrs_ids:
@@ -593,6 +707,9 @@ class SetEventModal(discord.ui.Modal):
                 max_length=200,
             )
         )
+        # py-cord 2.7.2 loses required=False in the InputText constructor.
+        self.children[-1].required = False
+
 
     async def callback(self, interaction: discord.Interaction):
         tournament_slug = self.children[0].value
@@ -621,6 +738,7 @@ class SetEventModal(discord.ui.Modal):
             await interaction.followup.send(f"No start.gg event was found for `{full_event_slug}`.", ephemeral=True)
             return
 
+        previous_event = config.config_store.get_active_event()
         config.config_store.set_active_event(
             tournament_slug=tournament_slug,
             event_slug=full_event_slug,
@@ -628,6 +746,19 @@ class SetEventModal(discord.ui.Modal):
             event_name=event["name"],
             pgrs_competition_id=pgrs_competition_id,
         )
+        from cogs.startgg import invalidate_event_state, refresh_event_cache
+        active_event = config.config_store.get_active_event()
+        if previous_event != active_event:
+            invalidate_event_state()
+        try:
+            await refresh_event_cache(active_event)
+        except StartGGError as error:
+            cache_message = f" Event data could not be loaded: {error}. Use `/refresh_event` to retry."
+        else:
+            cache_message = " Event data loaded."
+            cog = interaction.client.get_cog("Startgg")
+            if cog is not None and await cog.update_bracket_images(active_event):
+                cache_message += " Bracket images could not be updated. Retry publication from the admin panel."
         try:
             sync_result = await sync_participant_role(interaction.guild)
         except (StartGGError, PGRSError) as error:
@@ -643,7 +774,7 @@ class SetEventModal(discord.ui.Modal):
         await refresh_admin_panel(interaction)
         await interaction.followup.send(
             f"Active event set to {event['name']} (`{full_event_slug}`).{pgrs_message}"
-            f"{format_role_sync_result(sync_result)}{sync_error}",
+            f"{format_role_sync_result(sync_result)}{sync_error}{cache_message}",
             ephemeral=True,
         )
 
@@ -668,6 +799,36 @@ class SetAdminRoleModal(discord.ui.Modal):
         config.config_store.set_admin_role_id(role.id)
         await refresh_admin_panel(interaction)
         await interaction.response.send_message(f"Luna admin role set to {role.mention}.", ephemeral=True)
+
+
+class SetEventRefreshModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Event synchronization")
+        self.add_item(discord.ui.InputText(
+            label="Interval in seconds (0 = disabled)",
+            value=str(config.config_store.get_event_refresh_interval()),
+            required=True,
+            max_length=8,
+        ))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_luna_admin(interaction):
+            await interaction.response.send_message("Only Luna admins can change event synchronization.", ephemeral=True)
+            return
+        try:
+            seconds = int(self.children[0].value)
+            config.config_store.set_event_refresh_interval(seconds)
+        except (ValueError, TypeError):
+            await interaction.response.send_message("Enter a whole number of seconds, or 0 to disable synchronization.", ephemeral=True)
+            return
+        cog = config.bot.get_cog("Startgg")
+        if cog is not None:
+            cog.configure_event_sync()
+        await interaction.response.send_message(
+            f"Event synchronization set to every {seconds} seconds." if seconds else "Periodic event synchronization disabled.",
+            ephemeral=True,
+        )
+        await refresh_admin_panel(interaction)
 
 
 class SetScoreTargetsModal(discord.ui.Modal):

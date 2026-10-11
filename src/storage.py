@@ -36,6 +36,8 @@ class LinkStore:
             self.cursor.execute("ALTER TABLE links ADD COLUMN pgrs_player_name TEXT")
         if "pgrs_player_id" not in columns:
             self.cursor.execute("ALTER TABLE links ADD COLUMN pgrs_player_id TEXT")
+        if "account_from_japan" not in columns:
+            self.cursor.execute("ALTER TABLE links ADD COLUMN account_from_japan INTEGER NOT NULL DEFAULT 0")
         self.connection.commit()
 
     def set_startgg_link(
@@ -89,6 +91,13 @@ class LinkStore:
                 datetime.now(timezone.utc).isoformat(),
                 discord_user_id,
             ),
+        )
+        self.connection.commit()
+
+    def set_account_from_japan(self, discord_user_id: int, enabled: bool):
+        self.cursor.execute(
+            "UPDATE links SET account_from_japan = ?, updated_at = ? WHERE discord_user_id = ?",
+            (int(enabled), datetime.now(timezone.utc).isoformat(), discord_user_id),
         )
         self.connection.commit()
 
@@ -342,6 +351,99 @@ class ConfigStore:
 
         self._save(data)
         return True
+
+    def get_event_announcement_channel_id(self, guild_id: int) -> int | None:
+        channel_id = self._load().get("event_announcement_channels", {}).get(str(guild_id))
+        return int(channel_id) if channel_id else None
+
+    def get_event_announcement_channels(self) -> dict[int, int]:
+        return {
+            int(guild_id): int(channel_id)
+            for guild_id, channel_id in self._load().get("event_announcement_channels", {}).items()
+        }
+
+    def set_event_announcement_channel_id(self, guild_id: int, channel_id: int):
+        data = self._load()
+        data.setdefault("event_announcement_channels", {})[str(guild_id)] = str(channel_id)
+        self._save(data)
+
+    def clear_event_announcement_channel_id(self, guild_id: int) -> bool:
+        data = self._load()
+        if data.get("event_announcement_channels", {}).pop(str(guild_id), None) is None:
+            return False
+        self._save(data)
+        return True
+
+    def get_bracket_image_channel_id(self, guild_id: int) -> int | None:
+        channel_id = self._load().get("bracket_image_channels", {}).get(str(guild_id))
+        return int(channel_id) if channel_id else None
+
+    def set_bracket_image_channel_id(self, guild_id: int, channel_id: int):
+        data = self._load()
+        data.setdefault("bracket_image_channels", {})[str(guild_id)] = str(channel_id)
+        self._save(data)
+
+    def clear_bracket_image_channel_id(self, guild_id: int) -> bool:
+        data = self._load()
+        if data.get("bracket_image_channels", {}).pop(str(guild_id), None) is None:
+            return False
+        self._save(data)
+        return True
+
+    def get_bracket_image_messages(self, guild_id: int, event_id: int, channel_id: int) -> dict[str, int]:
+        messages = (self._load().get("bracket_image_messages", {})
+                    .get(str(guild_id), {}).get(str(event_id), {}).get(str(channel_id), {}))
+        return {image_key: int(message_id) for image_key, message_id in messages.items()}
+
+    def set_bracket_image_message(self, guild_id: int, event_id: int, channel_id: int,
+                                  image_key: str, message_id: int):
+        """Save each successful publication independently (e.g. pools:1 or bracket:123)."""
+        data = self._load()
+        messages = (data.setdefault("bracket_image_messages", {})
+                    .setdefault(str(guild_id), {}).setdefault(str(event_id), {}).setdefault(str(channel_id), {}))
+        messages[image_key] = str(message_id)
+        self._save(data)
+
+    def clear_bracket_image_message(self, guild_id: int, event_id: int, channel_id: int,
+                                    image_key: str) -> bool:
+        data = self._load()
+        messages = (data.get("bracket_image_messages", {})
+                    .get(str(guild_id), {}).get(str(event_id), {}).get(str(channel_id), {}))
+        if messages.pop(image_key, None) is None:
+            return False
+        self._save(data)
+        return True
+
+    def get_completed_group_announcements(self, event_id: int) -> set[int]:
+        return set(self._load().get("completed_group_announcements", {}).get(str(event_id), []))
+
+    def set_completed_group_announcements(self, event_id: int, group_ids: set[int]):
+        data = self._load()
+        history = data.setdefault("completed_group_announcements", {})
+        if set(history.get(str(event_id), [])) == group_ids:
+            return
+        history[str(event_id)] = sorted(group_ids)
+        self._save(data)
+
+    def get_match_announcement_history(self, event_id: int) -> dict:
+        return self._load().get("match_announcement_history", {}).get(str(event_id), {})
+
+    def set_match_announcement_history(self, event_id: int, history: dict):
+        data = self._load()
+        events = data.setdefault("match_announcement_history", {})
+        if events.get(str(event_id)) != history:
+            events[str(event_id)] = history
+            self._save(data)
+
+    def get_event_refresh_interval(self) -> int:
+        return int(self._load().get("event_refresh_interval_seconds", 0))
+
+    def set_event_refresh_interval(self, seconds: int):
+        if type(seconds) is not int or seconds < 0:
+            raise ValueError("The refresh interval must be a non-negative integer")
+        data = self._load()
+        data["event_refresh_interval_seconds"] = seconds
+        self._save(data)
 
     def get_score_targets(self) -> dict:
         score_targets = self._load().get("score_targets") or {}

@@ -1,12 +1,14 @@
 import asyncio
+import logging
 import config
 import discord
 import shutil
 import subprocess
 from datetime import datetime
 from datetime import timezone
-from discord.ext import commands
+from discord.ext import commands, tasks
 from participant_role import sync_participant_role
+from seeding import is_pool_group
 from pathlib import Path
 from pgrs import PGRSError
 from startgg import StartGGClient, StartGGError
@@ -18,6 +20,81 @@ class Startgg(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.configure_event_sync()
+        active_event = config.config_store.get_active_event()
+        if active_event is None or config.startgg_client is None:
+            return
+        if event_cache.get("event_id") == active_event["event_id"]:
+            return
+        try:
+            await refresh_event_cache(active_event)
+        except StartGGError as error:
+            logging.getLogger(__name__).warning("Could not load the active event on startup: %s", error)
+            return
+        await self.update_bracket_images(active_event)
+
+    def configure_event_sync(self):
+        seconds = config.config_store.get_event_refresh_interval()
+        if seconds == 0:
+            self.event_sync_loop.cancel()
+            return
+        self.event_sync_loop.change_interval(seconds=seconds)
+        if not self.event_sync_loop.is_running():
+            self.event_sync_loop.start()
+        elif self.event_sync_loop.get_task().cancelling():
+            self.event_sync_loop.restart()
+
+    def cog_unload(self):
+        self.event_sync_loop.cancel()
+
+    @tasks.loop(seconds=60)
+    async def event_sync_loop(self):
+        active_event = config.config_store.get_active_event()
+        if active_event is None or config.startgg_client is None:
+            return
+        try:
+            await refresh_event_cache(active_event)
+        except StartGGError as error:
+            logging.getLogger(__name__).warning("Could not synchronize the active event: %s", error)
+            return
+
+        for guild_id, channel_id in config.config_store.get_event_announcement_channels().items():
+            if not is_current_event(active_event):
+                return
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                logging.getLogger(__name__).warning("Event announcement channel %s is missing in guild %s", channel_id, guild_id)
+                continue
+            for announce in (announce_ready_matches_from_cache, announce_completed_phase_groups_from_cache):
+                try:
+                    await announce(channel, active_event)
+                except (StartGGError, discord.HTTPException) as error:
+                    logging.getLogger(__name__).warning("Could not publish event announcements in channel %s: %s", channel_id, error)
+
+        await self.update_bracket_images(active_event)
+
+    async def update_bracket_images(self, active_event: dict) -> int:
+        bracket = self.bot.get_cog("Bracket")
+        if bracket is None:
+            return 0
+        failures = 0
+        for guild in self.bot.guilds:
+            if not is_current_event(active_event):
+                break
+            if config.config_store.get_bracket_image_channel_id(guild.id) is None:
+                continue
+            try:
+                await bracket.publish_images(guild)
+            except (ValueError, RuntimeError, OSError, discord.HTTPException):
+                failures += 1
+                logging.getLogger(__name__).exception("Could not update bracket images in guild %s", guild.id)
+        return failures
 
     startgg = discord.SlashCommandGroup("startgg")
 
@@ -53,12 +130,22 @@ class Startgg(commands.Cog):
             await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
             return
 
-        await ctx.send_modal(
-            LinkStartggAccountModal(
-                ctx.author.id,
-                config.link_store.get_startgg_link(ctx.author.id),
-            )
-        )
+        existing_link = config.link_store.get_startgg_link(ctx.author.id)
+        profile_code = None
+        if existing_link:
+            try:
+                player = await asyncio.wait_for(
+                    config.startgg_client.get_player(int(existing_link["startgg_player_id"])),
+                    timeout=2,
+                )
+            except (StartGGError, asyncio.TimeoutError):
+                await ctx.respond("Could not load your start.gg profile. Please try /link again.", ephemeral=True)
+                return
+            profile_slug = ((player or {}).get("user") or {}).get("slug")
+            if profile_slug:
+                profile_code = profile_slug.rstrip("/").split("/")[-1]
+
+        await ctx.send_modal(LinkStartggAccountModal(ctx.author.id, existing_link, profile_code))
 
 
     @startgg.command(
@@ -115,18 +202,18 @@ class Startgg(commands.Cog):
         if active_event is None:
             await ctx.respond("No active start.gg event is configured yet.")
             return
-        await ctx.defer()
-        try:
-            phases = await config.startgg_client.get_event_phases(active_event["event_id"])
-        except StartGGError as error:
-            await ctx.respond(f"Could not read start.gg phases: {error}", ephemeral=True)
+        cached_event = event_cache.copy()
+        if cached_event.get("event_id") != active_event["event_id"]:
+            await ctx.respond("Event cache is not ready. Ask a Luna admin to use `/refresh_event` first.", ephemeral=True)
             return
+        await ctx.defer()
+        phases = cached_event["phases"]
         event_url = f"https://www.start.gg/{active_event['event_slug']}"
         embed_fields = [
             discord.EmbedField("event link", event_url, False)
         ]
         for phase in phases:
-            phase_groups = await config.startgg_client.get_phase_groups(phase["id"])
+            phase_groups = cached_event["phase_groups"][int(phase["id"])]
             phase_state = min([group["state"] for group in phase_groups]) if phase_groups else None
             fields = [
                 discord.EmbedField("phase", f"[{phase["name"]}](https://www.start.gg/{active_event["event_slug"]}/brackets/{phase["id"]})", True),
@@ -193,37 +280,25 @@ class Startgg(commands.Cog):
             default=None,
         ),
     ):
-        if config.startgg_client is None:
-            await ctx.respond("STARTGG_API_KEY is not configured yet.", ephemeral=True)
-            return
-
-        if phase:
-            phase = phase.strip()
-            await ctx.defer(ephemeral=True)
-
-            if phase.isdigit():
-                await respond_with_phase_group_sets(ctx, int(phase))
-                return
-
-            active_event = config.config_store.get_active_event()
-            if active_event is None:
-                await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
-                return
-
-            await respond_with_phase_sets(ctx, active_event, phase)
-            return
-
         active_event = config.config_store.get_active_event()
         if active_event is None:
             await ctx.respond("No active start.gg event is configured yet. // Aún no hay evento activo configurado.", ephemeral=True)
             return
-        link = config.link_store.get_startgg_link(ctx.author.id)
-        await ctx.defer(ephemeral=True)
-        try:
-            event_matches = await find_sets_for_event(active_event["event_id"])
-        except StartGGError as error:
-            await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
+        cached_event = event_cache.copy()
+        if cached_event.get("event_id") != active_event["event_id"]:
+            await ctx.respond("Event cache is not ready. Ask a Luna admin to use `/refresh_event` first.", ephemeral=True)
             return
+        await ctx.defer(ephemeral=True)
+        if phase:
+            phase = phase.strip()
+            if phase.isdigit():
+                await respond_with_phase_group_sets(ctx, int(phase), cached_event)
+            else:
+                await respond_with_phase_sets(ctx, active_event, phase, cached_event)
+            return
+
+        link = config.link_store.get_startgg_link(ctx.author.id)
+        event_matches = list(cached_event["matches"])
 
         player_matches = []
         if link is not None:
@@ -318,7 +393,7 @@ class Startgg(commands.Cog):
                     allowed_mentions=discord.AllowedMentions(users=True),
                 )
             except Exception:
-                release_pending_report(set_id, player_discord_ids)
+                release_pending_report(set_id, player_discord_ids, active_event)
                 raise
         except asyncio.TimeoutError:
             await ctx.respond("start.gg took too long to return your sets. Try again in a moment.", ephemeral=True)
@@ -385,7 +460,7 @@ class Startgg(commands.Cog):
                     view=view,
                 )
             except Exception:
-                release_pending_report(set_id, player_discord_ids)
+                release_pending_report(set_id, player_discord_ids, active_event)
                 raise
         except asyncio.TimeoutError:
             await ctx.respond("start.gg took too long to return your sets. Try again in a moment.", ephemeral=True)
@@ -423,7 +498,11 @@ class Startgg(commands.Cog):
             return
 
         await ctx.defer(ephemeral=True)
-        pinged_count = await announce_ready_matches_from_cache(ctx.channel, active_event, reping=reping)
+        try:
+            pinged_count = await announce_ready_matches_from_cache(ctx.channel, active_event, reping=reping)
+        except (StartGGError, discord.HTTPException) as error:
+            await ctx.respond(f"Could not announce ready matches: {error}", ephemeral=True)
+            return
         if pinged_count is None:
             await ctx.respond("Event cache is not ready. Use `/refresh_event` first.", ephemeral=True)
             return
@@ -462,15 +541,27 @@ class Startgg(commands.Cog):
             await ctx.respond(f"Could not refresh start.gg event data: {error}", ephemeral=True)
             return
 
+        try:
+            pinged_count = await announce_ready_matches_from_cache(ctx.channel, active_event, reopened_only=True)
+            completed_count = await announce_completed_phase_groups_from_cache(ctx.channel, active_event)
+        except (StartGGError, discord.HTTPException) as error:
+            await ctx.respond(f"Event data refreshed, but event announcements failed: {error}. Retry `/refresh_event`.", ephemeral=True)
+            return
+        if pinged_count is None or completed_count is None:
+            await ctx.respond("The active event changed. Run the command again.", ephemeral=True)
+            return
+        image_failures = await self.update_bracket_images(active_event)
+        image_notice = " Image updates failed; check Luna's logs and retry publication." if image_failures else ""
         await ctx.respond(
-            f"Refreshed {active_event['event_name']}: {len(matches)} reportable set(s) cached.",
+            f"Refreshed {active_event['event_name']}: {len(matches)} reportable set(s) cached. "
+            f"Announced {pinged_count} reopened match(es) and {completed_count} completed group(s)." + image_notice,
             ephemeral=True,
         )
 
     @discord.slash_command(
         name="podium"
     )
-    async def refresh_event(
+    async def podium(
         self,
         ctx: discord.ApplicationContext,
         background: discord.Option(str, choices=["Red", "Blue", "Yellow", "Green"]),
@@ -479,7 +570,7 @@ class Startgg(commands.Cog):
         third: discord.Member
     ):
         if not is_luna_admin(ctx):
-            await ctx.respond("Only Luna admins can refresh event data.", ephemeral=True)
+            await ctx.respond("Only Luna admins can create podium images.", ephemeral=True)
             return
         await ctx.defer(ephemeral=True)
         Path("rsc/img/tmp").mkdir(exist_ok=True)
@@ -551,10 +642,54 @@ def build_phase_group_links(active_event: dict, phase: dict, phase_groups: list[
 pending_report_user_ids_by_set: dict[int, set[int]] = {}
 pending_report_set_id_by_user: dict[int, int] = {}
 pinged_ready_set_ids: set[int] = set()
+pending_start_set_ids: set[int] = set()
+reopened_set_ids: set[int] = set()
+# One lock coordinates sends and cache publication; split by event if multiple events become active.
+match_announcement_lock = asyncio.Lock()
 pinged_waiting_players: set[tuple[int, int]] = set()
 announced_completed_phase_group_ids: set[int] = set()
 event_cache: dict = {}
-event_cache_lock = asyncio.Lock()
+event_refresh_task: asyncio.Task | None = None
+event_generation = 0
+event_results_revision = 0
+
+
+def invalidate_event_state():
+    global event_generation, event_refresh_task, event_results_revision
+    event_generation += 1
+    event_results_revision = 0
+    event_refresh_task = None
+    event_cache.clear()
+    pending_report_user_ids_by_set.clear()
+    pending_report_set_id_by_user.clear()
+    pinged_ready_set_ids.clear()
+    pending_start_set_ids.clear()
+    reopened_set_ids.clear()
+    pinged_waiting_players.clear()
+    announced_completed_phase_group_ids.clear()
+
+
+def save_match_announcement_history():
+    event_id = event_cache.get("event_id")
+    if event_id is None:
+        return
+    try:
+        config.config_store.set_match_announcement_history(event_id, {
+            "ready": sorted(pinged_ready_set_ids),
+            "waiting": [list(key) for key in sorted(pinged_waiting_players)],
+            "pending_start": sorted(pending_start_set_ids),
+            "reopened": sorted(reopened_set_ids),
+            "completed": sorted(
+                int(match["set"]["id"]) for match in event_cache.get("matches", [])
+                if is_real_set_id(match["set"]) and not is_pending_set(match["set"])
+            ),
+        })
+    except (OSError, ValueError) as error:
+        raise StartGGError(f"Could not save match announcement history: {error}") from error
+
+
+def is_current_event(active_event: dict) -> bool:
+    return config.config_store.get_active_event() == active_event
 
 
 class SetsInfoView(discord.ui.View):
@@ -655,7 +790,7 @@ class ReportConfirmationView(discord.ui.View):
         self.confirmed_user_names[interaction.user.id] = interaction.user.display_name
         if self.confirmed_user_ids != self.player_discord_ids:
             await interaction.response.edit_message(
-                content=build_player_report_confirmation_message(
+                content=f"{format_user_mentions(self.player_discord_ids)}\n"+build_player_report_confirmation_message(
                     self.match,
                     self.report,
                     confirmed_count=len(self.confirmed_user_ids),
@@ -670,22 +805,28 @@ class ReportConfirmationView(discord.ui.View):
         await interaction.response.defer()
 
         try:
+            if not is_current_event(self.active_event):
+                raise StartGGError("The active event changed. Run the command again.")
             await config.startgg_client.report_set(
                 set_id=int(self.match["set"]["id"]),
                 winner_id=self.report["winner_entrant_id"],
                 game_data=self.report["game_data"],
             )
         except StartGGError as error:
-            release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+            release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
             await interaction.message.edit(
                 content=f"Could not report start.gg set: {error}",
                 view=self,
             )
             return
 
+        if not is_current_event(self.active_event):
+            await interaction.followup.send("Result sent for the previous event; further checks were stopped.", ephemeral=True)
+            return
+
         set_id = int(self.match["set"]["id"])
-        remove_cached_set(self.active_event, set_id)
-        release_pending_report(set_id, self.player_discord_ids)
+        mark_cached_set_completed(self.active_event, set_id, self.report["winner_entrant_id"])
+        release_pending_report(set_id, self.player_discord_ids, self.active_event)
         report_message = build_player_report_success_message(self.match, self.report, self.active_event)
         await interaction.message.edit(
             content=f"{report_message}\n\nLuna is checking for ready matches...",
@@ -695,9 +836,8 @@ class ReportConfirmationView(discord.ui.View):
             update_ready_match_check_message(
                 message=interaction.message,
                 channel=interaction.channel,
+                bot=interaction.client,
                 active_event=self.active_event,
-                match=self.match,
-                report=self.report,
                 report_message=report_message,
             )
         )
@@ -709,7 +849,7 @@ class ReportConfirmationView(discord.ui.View):
 
         self.finished = True
         self.disable_all_items()
-        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
         await interaction.response.edit_message(
             content="Result report cancelled. Run `/report` again when both players are ready.",
             view=self,
@@ -717,7 +857,7 @@ class ReportConfirmationView(discord.ui.View):
 
     @discord.ui.button(label="Ping Admin", style=discord.ButtonStyle.secondary)
     async def admin_dq(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This report confirmation is already closed.", ephemeral=True)
             return
 
@@ -733,7 +873,7 @@ class ReportConfirmationView(discord.ui.View):
         await interaction.response.send_message("Only players in this set or Luna admins can use this button.", ephemeral=True)
 
     async def can_use_button(self, interaction: discord.Interaction) -> bool:
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This report confirmation is already closed.", ephemeral=True)
             return False
 
@@ -746,7 +886,7 @@ class ReportConfirmationView(discord.ui.View):
     async def on_timeout(self):
         self.finished = True
         self.disable_all_items()
-        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
 
 
 class DQRequestView(discord.ui.View):
@@ -766,7 +906,7 @@ class DQRequestView(discord.ui.View):
 
     @discord.ui.button(label="Ping Admin", style=discord.ButtonStyle.secondary)
     async def ping_admin(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This DQ request is already closed.", ephemeral=True)
             return
 
@@ -778,7 +918,7 @@ class DQRequestView(discord.ui.View):
 
     @discord.ui.button(label="Admin DQ", style=discord.ButtonStyle.danger)
     async def admin_dq(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This DQ request is already closed.", ephemeral=True)
             return
 
@@ -791,7 +931,7 @@ class DQRequestView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.finished:
+        if self.finished or not is_current_event(self.active_event):
             await interaction.response.send_message("This DQ request is already closed.", ephemeral=True)
             return
 
@@ -801,7 +941,7 @@ class DQRequestView(discord.ui.View):
 
         self.finished = True
         self.disable_all_items()
-        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
         await interaction.response.edit_message(
             content="DQ request cancelled. Run `/dq` again if admin help is needed.",
             view=self,
@@ -810,7 +950,7 @@ class DQRequestView(discord.ui.View):
     async def on_timeout(self):
         self.finished = True
         self.disable_all_items()
-        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids)
+        release_pending_report(int(self.match["set"]["id"]), self.player_discord_ids, self.active_event)
 
 
 class DQReportModal(discord.ui.Modal):
@@ -826,6 +966,10 @@ class DQReportModal(discord.ui.Modal):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        if self.report_view.finished or not is_current_event(self.report_view.active_event):
+            await interaction.response.send_message("This DQ request is no longer active.", ephemeral=True)
+            return
+
         if not is_luna_admin_interaction(interaction):
             await interaction.response.send_message("Only Luna admins can report DQs.", ephemeral=True)
             return
@@ -845,6 +989,8 @@ class DQReportModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
 
         try:
+            if not is_current_event(self.report_view.active_event):
+                raise StartGGError("The active event changed. Run the command again.")
             await config.startgg_client.report_set(
                 set_id=int(self.report_view.match["set"]["id"]),
                 winner_id=dq_report["winner_entrant_id"],
@@ -852,13 +998,17 @@ class DQReportModal(discord.ui.Modal):
                 game_data=None,
             )
         except StartGGError as error:
-            release_pending_report(int(self.report_view.match["set"]["id"]), self.report_view.player_discord_ids)
+            release_pending_report(int(self.report_view.match["set"]["id"]), self.report_view.player_discord_ids, self.report_view.active_event)
             await interaction.followup.send(f"Could not report DQ to start.gg: {error}", ephemeral=True)
             return
 
+        if not is_current_event(self.report_view.active_event):
+            await interaction.followup.send("Result sent for the previous event; further checks were stopped.", ephemeral=True)
+            return
+
         set_id = int(self.report_view.match["set"]["id"])
-        remove_cached_set(self.report_view.active_event, set_id)
-        release_pending_report(set_id, self.report_view.player_discord_ids)
+        mark_cached_set_completed(self.report_view.active_event, set_id, dq_report["winner_entrant_id"])
+        release_pending_report(set_id, self.report_view.player_discord_ids, self.report_view.active_event)
         message = self.report_view.message
         if message:
             report_message = build_dq_report_success_message(
@@ -874,36 +1024,54 @@ class DQReportModal(discord.ui.Modal):
                 update_ready_match_check_message(
                     message=message,
                     channel=message.channel,
+                    bot=interaction.client,
                     active_event=self.report_view.active_event,
-                    match=self.report_view.match,
-                    report=dq_report,
                     report_message=report_message,
                 )
             )
         await interaction.followup.send("DQ reported.", ephemeral=True)
 
 
-class LinkStartggAccountModal(discord.ui.Modal):
-    def __init__(self, user_id: int, existing_link: dict | None = None):
+class LinkStartggAccountModal(discord.ui.DesignerModal):
+    def __init__(self, user_id: int, existing_link: dict | None = None, profile_code: str | None = None):
         super().__init__(title="Link start.gg account")
         self.user_id = user_id
-        self.add_item(
-            discord.ui.InputText(
-                label="Player ID or profile code",
-                placeholder="74b6cc6d or https://www.start.gg/user/74b6cc6d",
-                value=str(existing_link["startgg_player_id"]) if existing_link else None,
-                required=True,
-            )
+        self.linked_player_id = str(existing_link["startgg_player_id"]) if existing_link else None
+        self.player_reference = discord.ui.InputText(
+            placeholder="74b6cc6d or https://www.start.gg/user/74b6cc6d",
+            value=profile_code,
+            required=True,
         )
-        self.add_item(
-            discord.ui.InputText(
-                label="PGRS player name (optional)",
-                placeholder="Your name in the PGRS page",
-                value=existing_link["pgrs_player_name"] if existing_link else None,
-                required=False,
-                max_length=100,
-            )
+        self.pgrs_name = discord.ui.InputText(
+            placeholder="Your name in the PGRS page",
+            value=existing_link["pgrs_player_name"] if existing_link else None,
+            required=False,
+            max_length=100,
         )
+        # py-cord 2.7.2 loses required=False in the InputText constructor.
+        self.pgrs_name.required = False
+        account_from_japan = bool(existing_link and existing_link.get("account_from_japan"))
+        self.japan_account = discord.ui.Select(
+            options=[
+                discord.SelectOption(label="No", value="no", default=not account_from_japan),
+                discord.SelectOption(label="Yes", value="yes", default=account_from_japan),
+            ],
+            min_values=1,
+            max_values=1,
+            required=True,
+        )
+        self.add_item(discord.ui.Label("Profile code or URL", self.player_reference))
+        self.add_item(discord.ui.Label("PGRS player name (optional)", self.pgrs_name))
+        self.add_item(discord.ui.Label(
+            "My account is from Japan",
+            self.japan_account,
+        ))
+
+    def to_dict(self):
+        payload = super().to_dict()
+        # py-cord 2.7.2 resets required=False when serializing a Label's InputText.
+        payload["components"][1]["component"]["required"] = False
+        return payload
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
@@ -914,8 +1082,13 @@ class LinkStartggAccountModal(discord.ui.Modal):
             await interaction.response.send_message("STARTGG_API_KEY is not configured yet.", ephemeral=True)
             return
 
-        player_reference = self.children[0].value
-        pgrs_player_name = (self.children[1].value or "").strip() or None
+        selection = self.japan_account.values
+        if selection not in (["yes"], ["no"]):
+            await interaction.response.send_message("Please choose Yes or No for your account region.", ephemeral=True)
+            return
+        account_from_japan = selection == ["yes"]
+        player_reference = self.player_reference.value
+        pgrs_player_name = (self.pgrs_name.value or "").strip() or None
         await interaction.response.defer(ephemeral=True)
 
         try:
@@ -931,6 +1104,12 @@ class LinkStartggAccountModal(discord.ui.Modal):
             await interaction.followup.send(f"Could not verify that start.gg profile: {error}", ephemeral=True)
             return
 
+        current_link = config.link_store.get_startgg_link(self.user_id)
+        current_player_id = str(current_link["startgg_player_id"]) if current_link else None
+        if current_player_id != self.linked_player_id:
+            await interaction.followup.send("Your linked account changed. Please open /link again.", ephemeral=True)
+            return
+
         config.link_store.set_startgg_link(
             discord_user_id=interaction.user.id,
             startgg_player_id=int(player["id"]),
@@ -938,6 +1117,7 @@ class LinkStartggAccountModal(discord.ui.Modal):
             prefix=player.get("prefix"),
         )
         config.link_store.set_pgrs_link(interaction.user.id, pgrs_player_name)
+        config.link_store.set_account_from_japan(interaction.user.id, account_from_japan)
         try:
             sync_result = await sync_participant_role(interaction.guild, interaction.user.id)
         except (StartGGError, PGRSError):
@@ -946,10 +1126,9 @@ class LinkStartggAccountModal(discord.ui.Modal):
         if sync_result and sync_result["assigned"]:
             role_message = " Your tournament participant role was also assigned."
         pgrs_message = " PGRS player name saved." if pgrs_player_name else " No PGRS player name was saved."
-        await interaction.followup.send(
-            f"Linked your Discord account to {format_startgg_player(player)}.{pgrs_message}{role_message}",
-            ephemeral=True,
-        )
+        confirmation = f"Linked your Discord account to {format_startgg_player(player)}.{pgrs_message}{role_message}"
+        reminders = "disabled" if account_from_japan else "enabled"
+        await interaction.followup.send(f"{confirmation} PGRS reminders: {reminders}.", ephemeral=True)
 
 
 async def send_admin_ping_with_cooldown(view, interaction: discord.Interaction):
@@ -992,7 +1171,9 @@ def register_pending_report(set_id: int, player_discord_ids: set[int]):
         pending_report_set_id_by_user[player_discord_id] = set_id
 
 
-def release_pending_report(set_id: int, player_discord_ids: set[int]):
+def release_pending_report(set_id: int, player_discord_ids: set[int], active_event: dict):
+    if not is_current_event(active_event):
+        return
     pending_report_user_ids_by_set.pop(set_id, None)
     for player_discord_id in player_discord_ids:
         if pending_report_set_id_by_user.get(player_discord_id) == set_id:
@@ -1000,25 +1181,110 @@ def release_pending_report(set_id: int, player_discord_ids: set[int]):
 
 
 async def refresh_event_cache(active_event: dict) -> list[dict]:
-    async with event_cache_lock:
-        matches = await find_reportable_sets_for_event(active_event["event_id"])
-        event_cache.clear()
-        event_cache.update(
-            {
-                "event_id": active_event["event_id"],
-                "event_name": active_event["event_name"],
-                "matches": matches,
-                "updated_at": datetime.now(timezone.utc),
+    global event_refresh_task
+    generation = event_generation
+    if not is_current_event(active_event):
+        raise StartGGError("The active event changed. Run the command again.")
+    if event_refresh_task is None or event_refresh_task.done():
+        event_refresh_task = asyncio.create_task(_refresh_event_cache(active_event, generation))
+        # Retrieve failures even if every caller stops waiting for the shared task.
+        event_refresh_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+    matches = await asyncio.shield(event_refresh_task)
+    if generation != event_generation or not is_current_event(active_event):
+        raise StartGGError("The active event changed. Run the command again.")
+    return matches
+
+
+async def _refresh_event_cache(active_event: dict, generation: int) -> list[dict]:
+    while True:
+        if generation != event_generation or not is_current_event(active_event):
+            raise StartGGError("The active event changed. Run the command again.")
+        revision = event_results_revision
+        state = await fetch_event_state(active_event["event_id"])
+        if generation != event_generation or not is_current_event(active_event):
+            raise StartGGError("The active event changed. Run the command again.")
+        # Recheck results after waiting for any in-flight announcement.
+        async with match_announcement_lock:
+            if generation != event_generation or not is_current_event(active_event):
+                raise StartGGError("The active event changed. Run the command again.")
+            if revision != event_results_revision:
+                continue
+            try:
+                announced = config.config_store.get_completed_group_announcements(active_event["event_id"])
+                reopened_groups = {
+                    int(group["id"])
+                    for groups in state["phase_groups"].values() for group in groups
+                    if str(group.get("state")).casefold() in {"1", "2", "4", "created", "active", "ready"}
+                }
+                announced.difference_update(reopened_groups)
+                config.config_store.set_completed_group_announcements(active_event["event_id"], announced)
+            except (OSError, ValueError) as error:
+                raise StartGGError(f"Could not save completion announcement history: {error}") from error
+            announced_completed_phase_group_ids.clear()
+            announced_completed_phase_group_ids.update(announced)
+            try:
+                history = config.config_store.get_match_announcement_history(active_event["event_id"])
+            except (OSError, ValueError) as error:
+                raise StartGGError(f"Could not load match announcement history: {error}") from error
+            if event_cache.get("event_id") != active_event["event_id"]:
+                pinged_ready_set_ids.update(history.get("ready", []))
+                pinged_waiting_players.update(tuple(key) for key in history.get("waiting", []))
+                pending_start_set_ids.update(history.get("pending_start", []))
+                reopened_set_ids.update(history.get("reopened", []))
+            previous_sets = {
+                str(match["set"]["id"]): match["set"]
+                for match in event_cache.get("matches", [])
+            } if event_cache.get("event_id") == active_event["event_id"] else {}
+            reopened = {
+                int(match["set"]["id"])
+                for match in state["matches"]
+                if is_real_set_id(match["set"])
+                and is_pending_set(match["set"])
+                and (
+                    int(match["set"]["id"]) in history.get("completed", [])
+                    or ((previous := previous_sets.get(str(match["set"]["id"]))) is not None
+                        and not is_pending_set(previous))
+                )
             }
-        )
-        return matches
+            reopened_set_ids.update(reopened)
+            reopened_set_ids.intersection_update(
+                int(match["set"]["id"]) for match in state["matches"]
+                if is_real_set_id(match["set"]) and is_pending_set(match["set"])
+            )
+            pinged_ready_set_ids.difference_update(reopened)
+            pinged_waiting_players.difference_update({
+                key for key in pinged_waiting_players if key[1] in reopened
+            })
+            synced_at = datetime.now(timezone.utc)
+            state["standings_updated_at"] = {group_id: synced_at for group_id in state["standings"]}
+            if event_cache.get("event_id") == active_event["event_id"]:
+                for group_id in state["standings_errors"]:
+                    if group_id in event_cache.get("standings", {}):
+                        state["standings"][group_id] = event_cache["standings"][group_id]
+                        state["standings_updated_at"][group_id] = event_cache.get(
+                            "standings_updated_at", {}
+                        ).get(group_id)
+            event_cache.clear()
+            event_cache.update(
+                {
+                    "event_id": active_event["event_id"],
+                    "event_name": active_event["event_name"],
+                    **state,
+                    "updated_at": synced_at,
+                }
+            )
+            save_match_announcement_history()
+        return get_cached_reportable_matches(active_event)
 
 
 def get_cached_reportable_matches(active_event: dict) -> list[dict] | None:
     if event_cache.get("event_id") != active_event["event_id"]:
         return None
 
-    return list(event_cache.get("matches") or [])
+    return [
+        match for match in event_cache.get("matches") or []
+        if is_active_phase_group(match["phase_group"]) and is_reportable_set(match["set"])
+    ]
 
 
 def get_cached_reportable_sets_for_player(active_event: dict, player_id: int) -> list[dict] | None:
@@ -1032,34 +1298,65 @@ def get_cached_reportable_sets_for_player(active_event: dict, player_id: int) ->
     ]
 
 
-def remove_cached_set(active_event: dict, set_id: int):
-    if event_cache.get("event_id") != active_event["event_id"]:
+def mark_cached_set_completed(active_event: dict, set_id: int, winner_id: int):
+    global event_results_revision
+    if not is_current_event(active_event) or event_cache.get("event_id") != active_event["event_id"]:
         return
 
-    event_cache["matches"] = [
-        match for match in event_cache.get("matches") or []
-        if str(match["set"].get("id")) != str(set_id)
-    ]
+    event_results_revision += 1
+    for match in event_cache.get("matches") or []:
+        if str(match["set"].get("id")) == str(set_id):
+            match["set"] = {**match["set"], "state": 3, "winnerId": winner_id}
+            return
+
+
+def get_event_announcement_channel(channel):
+    guild = getattr(channel, "guild", None)
+    if guild is None:
+        return channel
+    channel_id = config.config_store.get_event_announcement_channel_id(guild.id)
+    if channel_id is None:
+        return channel
+    destination = guild.get_channel(channel_id)
+    if destination is None:
+        raise StartGGError("The event announcement channel is missing. Update Channel settings in the admin panel.")
+    permissions = destination.permissions_for(guild.me) if guild.me else None
+    if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
+        raise StartGGError("Luna needs View Channel, Send Messages and Embed Links in the event announcement channel.")
+    return destination
 
 
 async def announce_ready_matches(channel, active_event: dict, reping: bool = False) -> int:
+    generation = event_generation
     event_matches = await find_reportable_sets_for_event(active_event["event_id"])
+    if generation != event_generation or not is_current_event(active_event):
+        return 0
     return await announce_ready_matches_for_matches(channel, event_matches, reping=reping)
 
 
-async def announce_ready_matches_from_cache(channel, active_event: dict, reping: bool = False) -> int | None:
-    event_matches = get_cached_reportable_matches(active_event)
-    if event_matches is None:
-        return None
+async def announce_ready_matches_from_cache(channel, active_event: dict, reping: bool = False, reopened_only: bool = False) -> int | None:
+    generation = event_generation
+    async with match_announcement_lock:
+        if generation != event_generation or not is_current_event(active_event):
+            return None
+        event_matches = get_cached_reportable_matches(active_event)
+        if event_matches is None:
+            return None
+        return await announce_ready_matches_for_matches(
+            channel, event_matches, reping=reping,
+            only_set_ids=set(reopened_set_ids) if reopened_only else None,
+        )
 
-    return await announce_ready_matches_for_matches(channel, event_matches, reping=reping)
 
-
-async def announce_ready_matches_for_matches(channel, event_matches: list[dict], reping: bool = False) -> int:
+async def announce_ready_matches_for_matches(channel, event_matches: list[dict], reping: bool = False, only_set_ids: set[int] | None = None) -> int:
+    global event_results_revision
+    channel = get_event_announcement_channel(channel)
+    generation = event_generation
     ready_matches = find_ready_matches_for_ping(event_matches)
     new_ready_matches = [
         match for match in ready_matches
-        if reping or int(match["set"]["id"]) not in pinged_ready_set_ids
+        if (reping or int(match["set"]["id"]) not in pinged_ready_set_ids)
+        and (only_set_ids is None or int(match["set"]["id"]) in only_set_ids)
     ]
 
     for match in new_ready_matches:
@@ -1070,12 +1367,46 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
+        if generation != event_generation:
+            return 0
         pinged_ready_set_ids.add(set_id)
+        reopened_set_ids.discard(set_id)
+        if str(match["set"].get("state")).casefold() not in {"2", "active"}:
+            pending_start_set_ids.add(set_id)
+        save_match_announcement_history()
+
+    pending_start_set_ids.intersection_update(int(match["set"]["id"]) for match in event_matches if is_reportable_set(match["set"]))
+    start_error = None
+    for match in event_matches:
+        if not is_real_set_id(match["set"]):
+            continue
+        set_id = int(match["set"]["id"])
+        if set_id not in pending_start_set_ids:
+            continue
+        if generation != event_generation:
+            return 0
+        if str(match["set"].get("state")).casefold() not in {"2", "active"}:
+            try:
+                if config.startgg_client is None:
+                    raise StartGGError("start.gg is not configured")
+                await config.startgg_client.mark_set_in_progress(set_id)
+            except StartGGError as error:
+                start_error = error
+                continue
+            if generation != event_generation:
+                return 0
+            event_results_revision += 1
+            for cached_match in event_cache.get("matches") or []:
+                if str(cached_match["set"].get("id")) == str(set_id) and is_pending_set(cached_match["set"]):
+                    cached_match["set"] = {**cached_match["set"], "state": 2}
+        pending_start_set_ids.discard(set_id)
+        save_match_announcement_history()
 
     waiting_players = find_waiting_players_for_ping(event_matches, ready_matches)
     new_waiting_players = [
         waiting_player for waiting_player in waiting_players
-        if reping or waiting_player_key(waiting_player) not in pinged_waiting_players
+        if (reping or waiting_player_key(waiting_player) not in pinged_waiting_players)
+        and (only_set_ids is None or waiting_player_key(waiting_player)[1] in only_set_ids)
     ]
     for waiting_player in new_waiting_players:
         content, embed = build_waiting_player_ping(waiting_player)
@@ -1084,128 +1415,113 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
+        if generation != event_generation:
+            return 0
         pinged_waiting_players.add(waiting_player_key(waiting_player))
+        save_match_announcement_history()
 
+    if start_error is not None:
+        raise StartGGError(f"Players were pinged, but some sets could not be started: {start_error}")
     return len(new_ready_matches)
 
 
 async def update_ready_match_check_message(
     message,
     channel,
+    bot,
     active_event: dict,
-    match: dict,
-    report: dict,
     report_message: str,
 ):
+    generation = event_generation
+    if not is_current_event(active_event):
+        return
     try:
         await refresh_event_cache(active_event)
         pinged_count = await announce_ready_matches_from_cache(channel, active_event)
-    except StartGGError as error:
+    except (StartGGError, discord.HTTPException) as error:
         await message.edit(
             content=f"{report_message}\n\nScore reported, but Luna could not check ready matches: {error}"
         )
         return
 
-    try:
-        completion_announcement = await get_completion_announcement(match, report)
-    except StartGGError:
-        completion_announcement = None
+    if generation != event_generation or not is_current_event(active_event):
+        return
 
-    if completion_announcement:
-        await channel.send(completion_announcement)
+    try:
+        await announce_completed_phase_groups_from_cache(channel, active_event)
+    except (StartGGError, discord.HTTPException) as error:
+        await message.edit(
+            content=f"{report_message}\n\nCompletion announcements failed: {error}. Retry `/refresh_event`."
+        )
+        return
+
+    if generation != event_generation or not is_current_event(active_event):
+        return
+
+    image_notice = ""
+    cog = bot.get_cog("Startgg")
+    if cog is not None:
+        failures = await cog.update_bracket_images(active_event)
+        if failures:
+            image_notice = "\n\nScore reported, but bracket images could not be updated. Retry publication from the admin panel."
+    if generation != event_generation or not is_current_event(active_event):
+        return
 
     if pinged_count:
-        await message.edit(content=f"{report_message}\n\nLuna pinged {pinged_count} ready match(es).")
+        await message.edit(content=f"{report_message}\n\nLuna pinged {pinged_count} ready match(es)." + image_notice)
         return
 
     await message.edit(
-        content=f"{report_message}\n\nNo new ready matches yet. Please wait for Luna's next ready match ping."
+        content=f"{report_message}\n\nNo new ready matches yet. Please wait for Luna's next ready match ping." + image_notice
     )
 
 
-async def get_completion_announcement(match: dict, report: dict) -> str | None:
-    phase = match["phase"]
-    phase_group = match["phase_group"]
-    set_data = match["set"]
-    phase_group_id = int(phase_group["id"])
-    if phase_group_id in announced_completed_phase_group_ids:
-        return None
-
-    phase_name = phase.get("name") or "Bracket"
-    normalized_phase_name = normalize_lookup_text(phase_name)
-    round_label = normalize_lookup_text(get_set_round_label(set_data))
-
-    if "pool" in normalized_phase_name:
-        completed = await wait_for_phase_group_completion(
-            phase_id=int(phase["id"]),
-            phase_group_id=phase_group_id,
-        )
-        if not completed:
+async def announce_completed_phase_groups_from_cache(channel, active_event: dict) -> int | None:
+    channel = get_event_announcement_channel(channel)
+    generation = event_generation
+    async with match_announcement_lock:
+        if generation != event_generation or not is_current_event(active_event):
             return None
+        if event_cache.get("event_id") != active_event["event_id"]:
+            return None
+        count = 0
+        for phase in event_cache.get("phases", []):
+            for group in event_cache.get("phase_groups", {}).get(int(phase["id"]), []):
+                if generation != event_generation or not is_current_event(active_event):
+                    return None
+                current_group = group
+                group_id = int(current_group["id"])
+                if group_id in announced_completed_phase_group_ids:
+                    continue
+                announcement = await get_completion_announcement(phase, current_group)
+                if announcement is None:
+                    continue
+                await channel.send(announcement)
+                if generation != event_generation or not is_current_event(active_event):
+                    return None
+                try:
+                    config.config_store.set_completed_group_announcements(
+                        active_event["event_id"], announced_completed_phase_group_ids | {group_id}
+                    )
+                except (OSError, ValueError) as error:
+                    raise StartGGError(f"Notice sent, but its history could not be saved: {error}") from error
+                announced_completed_phase_group_ids.add(group_id)
+                count += 1
+        return count
 
-        announced_completed_phase_group_ids.add(phase_group_id)
-        phase_group_label = phase_group.get("displayIdentifier") or phase_group_id
+
+async def get_completion_announcement(phase: dict, phase_group: dict) -> str | None:
+    """Build a completion notice from the refreshed start.gg group state."""
+    if str(phase_group.get("state")).casefold() not in {"3", "completed"}:
+        return None
+    phase_name = phase.get("name") or "Bracket"
+    group_label = phase_group.get("displayIdentifier") or phase_group["id"]
+    if "pool" in normalize_lookup_text(phase_name):
         return (
-            f"Pool {phase_group_label} has completed all of its sets.\n"
+            f"Pool {group_label} has completed all of its sets.\n"
             "Please wait for the final brackets to be prepared."
         )
-
-    tournament_finished = False
-    if "grand final reset" in round_label:
-        tournament_finished = True
-    elif round_label == "grand final":
-        tournament_finished = await winner_came_from_winners_final(
-            set_data=set_data,
-            winner_entrant_id=report["winner_entrant_id"],
-        )
-
-    if not tournament_finished:
-        return None
-
-    announced_completed_phase_group_ids.add(phase_group_id)
     return f"The **{phase_name}** tournament has finished."
-
-
-async def wait_for_phase_group_completion(phase_id: int, phase_group_id: int) -> bool:
-    for attempt in range(3):
-        phase_groups = await config.startgg_client.get_phase_groups(phase_id)
-        matching_group = next(
-            (
-                phase_group for phase_group in phase_groups
-                if str(phase_group.get("id")) == str(phase_group_id)
-            ),
-            None,
-        )
-        if matching_group and str(matching_group.get("state")).casefold() in {"3", "completed"}:
-            return True
-
-        if attempt < 2:
-            await asyncio.sleep(2)
-
-    return False
-
-
-async def winner_came_from_winners_final(set_data: dict, winner_entrant_id: int) -> bool:
-    winner_slot = next(
-        (
-            slot for slot in set_data.get("slots") or []
-            if str((slot.get("entrant") or {}).get("id")) == str(winner_entrant_id)
-        ),
-        None,
-    )
-    if winner_slot is None or normalize_lookup_text(winner_slot.get("prereqType") or "") != "set":
-        return False
-
-    prereq_id = winner_slot.get("prereqId")
-    if prereq_id is None or not str(prereq_id).isdigit():
-        return False
-
-    prerequisite_set = await config.startgg_client.get_set(int(prereq_id))
-    if prerequisite_set is None:
-        return False
-
-    prerequisite_round = normalize_lookup_text(get_set_round_label(prerequisite_set))
-    return prerequisite_round == "winners final"
 
 
 def find_ready_matches_for_ping(event_matches: list[dict]) -> list[dict]:
@@ -1522,22 +1838,46 @@ async def fetch_reportable_phase_group_matches(phase: dict, phase_group: dict) -
     return matches
 
 
-async def find_sets_for_event(event_id: int) -> list[dict]:
-    matches = []
+async def fetch_event_state(event_id: int) -> dict:
     phases = await config.startgg_client.get_event_phases(event_id)
-    for phase in phases:
-        phase_groups = await config.startgg_client.get_phase_groups(int(phase["id"]))
-        for phase_group in phase_groups:
-            sets = await config.startgg_client.get_phase_group_sets(int(phase_group["id"]))
-            for set_data in sets:
-                matches.append(
-                    {
-                        "phase": phase,
-                        "phase_group": phase_group,
-                        "set": set_data,
-                    }
-                )
-    return sort_set_matches(matches)
+    group_results = await asyncio.gather(*[
+        config.startgg_client.get_phase_groups(int(phase["id"]))
+        for phase in phases
+    ])
+    phase_groups = {int(phase["id"]): groups for phase, groups in zip(phases, group_results)}
+    groups_with_phases = [
+        (phase, group)
+        for phase in phases
+        for group in phase_groups[int(phase["id"])]
+    ]
+    pool_groups = [group for phase, group in groups_with_phases if is_pool_group(phase, group)]
+    set_results, standing_results = await asyncio.gather(
+        asyncio.gather(*[
+            config.startgg_client.get_phase_group_sets(int(group["id"]))
+            for _, group in groups_with_phases
+        ]),
+        asyncio.gather(*[
+            config.startgg_client.get_phase_group_standings(int(group["id"]))
+            for group in pool_groups
+        ], return_exceptions=True),
+    )
+    standings = {}
+    standings_errors = {}
+    for group, rows in zip(pool_groups, standing_results):
+        group_id = int(group["id"])
+        if isinstance(rows, StartGGError):
+            standings_errors[group_id] = str(rows)
+        elif isinstance(rows, BaseException):
+            raise rows
+        else:
+            standings[group_id] = rows
+    matches = [
+        {"phase": phase, "phase_group": group, "set": set_data}
+        for (phase, group), sets in zip(groups_with_phases, set_results)
+        for set_data in sets
+    ]
+    return {"phases": phases, "phase_groups": phase_groups, "matches": sort_set_matches(matches),
+            "standings": standings, "standings_errors": standings_errors}
 
 
 def is_active_phase_group(phase_group: dict) -> bool:
@@ -1928,12 +2268,11 @@ def format_slot_name_with_score(slot: dict) -> str:
     return f"{entrant.get('name') or 'Unnamed'}{score_text}"
 
 
-async def respond_with_phase_group_sets(ctx: discord.ApplicationContext, phase_group_id: int):
-    try:
-        sets = await config.startgg_client.get_phase_group_sets(phase_group_id)
-    except StartGGError as error:
-        await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
-        return
+async def respond_with_phase_group_sets(ctx: discord.ApplicationContext, phase_group_id: int, cached_event: dict):
+    sets = [
+        match["set"] for match in cached_event["matches"]
+        if str(match["phase_group"]["id"]) == str(phase_group_id)
+    ]
 
     if not sets:
         await ctx.respond(f"No sets found for phase group ID {phase_group_id}.", ephemeral=True)
@@ -1946,12 +2285,8 @@ async def respond_with_phase_group_sets(ctx: discord.ApplicationContext, phase_g
     )
 
 
-async def respond_with_phase_sets(ctx: discord.ApplicationContext, active_event: dict, phase_name: str):
-    try:
-        phases = await config.startgg_client.get_event_phases(active_event["event_id"])
-    except StartGGError as error:
-        await ctx.respond(f"Could not read start.gg phases: {error}", ephemeral=True)
-        return
+async def respond_with_phase_sets(ctx: discord.ApplicationContext, active_event: dict, phase_name: str, cached_event: dict):
+    phases = cached_event["phases"]
 
     matching_phases = find_phases_by_name(phases, phase_name)
     if not matching_phases:
@@ -1963,25 +2298,12 @@ async def respond_with_phase_sets(ctx: discord.ApplicationContext, active_event:
         )
         return
 
-    set_lines = []
-    for phase in matching_phases:
-        try:
-            phase_groups = await config.startgg_client.get_phase_groups(int(phase["id"]))
-        except StartGGError as error:
-            await ctx.respond(f"Could not read start.gg phase groups: {error}", ephemeral=True)
-            return
-
-        for phase_group in phase_groups:
-            try:
-                sets = await config.startgg_client.get_phase_group_sets(int(phase_group["id"]))
-            except StartGGError as error:
-                await ctx.respond(f"Could not read start.gg sets: {error}", ephemeral=True)
-                return
-
-            set_lines.extend(
-                format_phase_set_summary(phase, phase_group, set_data)
-                for set_data in sets
-            )
+    phase_ids = {str(phase["id"]) for phase in matching_phases}
+    set_lines = [
+        format_phase_set_summary(match["phase"], match["phase_group"], match["set"])
+        for match in cached_event["matches"]
+        if str(match["phase"]["id"]) in phase_ids
+    ]
 
     if not set_lines:
         await ctx.respond(f"No sets found for phase `{phase_name}`.", ephemeral=True)

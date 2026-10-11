@@ -1,3 +1,4 @@
+import logging
 import cogs
 import os # default module
 import config
@@ -15,9 +16,12 @@ async def hello(ctx: discord.ApplicationContext):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("cogs.bracket").setLevel(logging.INFO)
     config.bot.load_extension("cogs.admin")
     config.bot.load_extension("cogs.seeding")
     config.bot.load_extension("cogs.staff_help")
     config.bot.load_extension("cogs.startgg")
+    config.bot.load_extension("cogs.bracket")
     config.bot.load_extension("cogs.guess_clues")
     config.bot.run(os.getenv('BOT_TOKEN')) # run the bot with the token

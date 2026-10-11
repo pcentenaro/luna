@@ -332,8 +332,8 @@ class EventAnnouncementChannelSelect(discord.ui.Select):
         super().__init__(
             select_type=discord.ComponentType.channel_select,
             custom_id="admin:event_announcement_channel",
-            placeholder="Choose the event announcement channel",
-            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            placeholder="Choose the event announcement channel or post",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.public_thread],
             row=2,
         )
 
@@ -346,8 +346,10 @@ class EventAnnouncementChannelSelect(discord.ui.Select):
             return
         channel = self.values[0]
         permissions = channel.permissions_for(interaction.guild.me) if interaction.guild.me else None
-        if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
-            await interaction.response.send_message("Luna needs View Channel, Send Messages and Embed Links in that channel.", ephemeral=True)
+        is_thread = isinstance(channel, discord.Thread)
+        can_send = permissions and (permissions.send_messages_in_threads if is_thread else permissions.send_messages)
+        if (is_thread and channel.locked) or permissions is None or not (permissions.view_channel and can_send and permissions.embed_links):
+            await interaction.response.send_message("Luna needs View Channel, Send Messages (Send Messages in Threads for a post) and Embed Links in an unlocked destination.", ephemeral=True)
             return
         config.config_store.set_event_announcement_channel_id(interaction.guild.id, channel.id)
         await refresh_channel_settings_response(interaction)
@@ -359,8 +361,8 @@ class BracketImageChannelSelect(discord.ui.Select):
         super().__init__(
             select_type=discord.ComponentType.channel_select,
             custom_id="admin:bracket_image_channel",
-            placeholder="Choose the bracket image channel",
-            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            placeholder="Choose the bracket image channel or post",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.public_thread],
             row=4,
         )
 
@@ -373,8 +375,10 @@ class BracketImageChannelSelect(discord.ui.Select):
             return
         channel = self.values[0]
         permissions = channel.permissions_for(interaction.guild.me) if interaction.guild.me else None
-        if permissions is None or not (permissions.view_channel and permissions.send_messages and permissions.embed_links and permissions.attach_files and permissions.read_message_history):
-            await interaction.response.send_message("Luna needs View Channel, Send Messages, Embed Links, Attach Files and Read Message History in that channel.", ephemeral=True)
+        is_thread = isinstance(channel, discord.Thread)
+        can_send = permissions and (permissions.send_messages_in_threads if is_thread else permissions.send_messages)
+        if (is_thread and channel.locked) or permissions is None or not (permissions.view_channel and can_send and permissions.embed_links and permissions.attach_files and permissions.read_message_history):
+            await interaction.response.send_message("Luna needs View Channel, Send Messages (Send Messages in Threads for a post), Embed Links, Attach Files and Read Message History in an unlocked destination.", ephemeral=True)
             return
         config.config_store.set_bracket_image_channel_id(interaction.guild.id, channel.id)
         await refresh_channel_settings_response(interaction)
@@ -395,15 +399,15 @@ def build_channel_settings_embed(guild: discord.Guild) -> discord.Embed:
     )
     embed.add_field(name="Guess the Clues ranking", value=leaderboard_channel_value)
     event_channel_id = config.config_store.get_event_announcement_channel_id(guild.id)
-    event_channel = guild.get_channel(event_channel_id) if event_channel_id else None
+    event_channel = guild.get_channel_or_thread(event_channel_id) if event_channel_id else None
     event_channel_value = event_channel.mention if event_channel else (
-        f"Missing channel ID `{event_channel_id}`" if event_channel_id else "Not configured (uses the command channel)"
+        f"<#{event_channel_id}>" if event_channel_id else "Not configured (uses the command channel)"
     )
     embed.add_field(name="Event announcements", value=event_channel_value)
     image_channel_id = config.config_store.get_bracket_image_channel_id(guild.id)
-    image_channel = guild.get_channel(image_channel_id) if image_channel_id else None
+    image_channel = guild.get_channel_or_thread(image_channel_id) if image_channel_id else None
     image_channel_value = image_channel.mention if image_channel else (
-        f"Missing channel ID `{image_channel_id}`" if image_channel_id else "Not configured"
+        f"<#{image_channel_id}>" if image_channel_id else "Not configured"
     )
     embed.add_field(name="Bracket images", value=image_channel_value)
     return embed

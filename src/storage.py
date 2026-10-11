@@ -425,6 +425,16 @@ class ConfigStore:
         history[str(event_id)] = sorted(group_ids)
         self._save(data)
 
+    def get_match_announcement_history(self, event_id: int) -> dict:
+        return self._load().get("match_announcement_history", {}).get(str(event_id), {})
+
+    def set_match_announcement_history(self, event_id: int, history: dict):
+        data = self._load()
+        events = data.setdefault("match_announcement_history", {})
+        if events.get(str(event_id)) != history:
+            events[str(event_id)] = history
+            self._save(data)
+
     def get_event_refresh_interval(self) -> int:
         return int(self._load().get("event_refresh_interval_seconds", 0))
 

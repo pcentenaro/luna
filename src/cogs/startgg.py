@@ -669,6 +669,25 @@ def invalidate_event_state():
     announced_completed_phase_group_ids.clear()
 
 
+def save_match_announcement_history():
+    event_id = event_cache.get("event_id")
+    if event_id is None:
+        return
+    try:
+        config.config_store.set_match_announcement_history(event_id, {
+            "ready": sorted(pinged_ready_set_ids),
+            "waiting": [list(key) for key in sorted(pinged_waiting_players)],
+            "pending_start": sorted(pending_start_set_ids),
+            "reopened": sorted(reopened_set_ids),
+            "completed": sorted(
+                int(match["set"]["id"]) for match in event_cache.get("matches", [])
+                if is_real_set_id(match["set"]) and not is_pending_set(match["set"])
+            ),
+        })
+    except (OSError, ValueError) as error:
+        raise StartGGError(f"Could not save match announcement history: {error}") from error
+
+
 def is_current_event(active_event: dict) -> bool:
     return config.config_store.get_active_event() == active_event
 
@@ -1203,6 +1222,15 @@ async def _refresh_event_cache(active_event: dict, generation: int) -> list[dict
                 raise StartGGError(f"Could not save completion announcement history: {error}") from error
             announced_completed_phase_group_ids.clear()
             announced_completed_phase_group_ids.update(announced)
+            try:
+                history = config.config_store.get_match_announcement_history(active_event["event_id"])
+            except (OSError, ValueError) as error:
+                raise StartGGError(f"Could not load match announcement history: {error}") from error
+            if event_cache.get("event_id") != active_event["event_id"]:
+                pinged_ready_set_ids.update(history.get("ready", []))
+                pinged_waiting_players.update(tuple(key) for key in history.get("waiting", []))
+                pending_start_set_ids.update(history.get("pending_start", []))
+                reopened_set_ids.update(history.get("reopened", []))
             previous_sets = {
                 str(match["set"]["id"]): match["set"]
                 for match in event_cache.get("matches", [])
@@ -1212,8 +1240,11 @@ async def _refresh_event_cache(active_event: dict, generation: int) -> list[dict
                 for match in state["matches"]
                 if is_real_set_id(match["set"])
                 and is_pending_set(match["set"])
-                and (previous := previous_sets.get(str(match["set"]["id"]))) is not None
-                and not is_pending_set(previous)
+                and (
+                    int(match["set"]["id"]) in history.get("completed", [])
+                    or ((previous := previous_sets.get(str(match["set"]["id"]))) is not None
+                        and not is_pending_set(previous))
+                )
             }
             reopened_set_ids.update(reopened)
             reopened_set_ids.intersection_update(
@@ -1242,6 +1273,7 @@ async def _refresh_event_cache(active_event: dict, generation: int) -> list[dict
                     "updated_at": synced_at,
                 }
             )
+            save_match_announcement_history()
         return get_cached_reportable_matches(active_event)
 
 
@@ -1341,6 +1373,7 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
         reopened_set_ids.discard(set_id)
         if str(match["set"].get("state")).casefold() not in {"2", "active"}:
             pending_start_set_ids.add(set_id)
+        save_match_announcement_history()
 
     pending_start_set_ids.intersection_update(int(match["set"]["id"]) for match in event_matches if is_reportable_set(match["set"]))
     start_error = None
@@ -1367,7 +1400,7 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
                 if str(cached_match["set"].get("id")) == str(set_id) and is_pending_set(cached_match["set"]):
                     cached_match["set"] = {**cached_match["set"], "state": 2}
         pending_start_set_ids.discard(set_id)
-
+        save_match_announcement_history()
 
     waiting_players = find_waiting_players_for_ping(event_matches, ready_matches)
     new_waiting_players = [
@@ -1385,6 +1418,7 @@ async def announce_ready_matches_for_matches(channel, event_matches: list[dict],
         if generation != event_generation:
             return 0
         pinged_waiting_players.add(waiting_player_key(waiting_player))
+        save_match_announcement_history()
 
     if start_error is not None:
         raise StartGGError(f"Players were pinged, but some sets could not be started: {start_error}")

@@ -18,6 +18,7 @@ class Admin(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.notification_cooldown = commands.CooldownMapping.from_cooldown(1, 300, commands.BucketType.guild)
 
     admin = discord.SlashCommandGroup("admin")
 
@@ -93,6 +94,11 @@ class Admin(commands.Cog):
             return
         if config.startgg_client is None:
             await ctx.send("STARTGG_API_KEY is not configured yet.")
+            return
+
+        retry_after = self.notification_cooldown.get_bucket(ctx.message).update_rate_limit()
+        if retry_after:
+            await ctx.send(f"Registration reminders are on cooldown. Try again in {int(retry_after) + 1} seconds.")
             return
 
         try:

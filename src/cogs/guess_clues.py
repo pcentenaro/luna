@@ -683,9 +683,9 @@ def matching_criteria(word: str, entry: dict) -> set[str]:
         matches.add("same_ends")
     matches.update(categories & {"noun", "verb", "adjective", "adverb"})
     matches.update(genders & {"feminine", "masculine"})
-    if "adjective" in categories and word.endswith("a", "as"):
+    if "adjective" in categories and word.endswith(("a", "as")):
         matches.add("feminine")
-    elif "adjective" in categories and word.endswith("o", "os"):
+    elif "adjective" in categories and word.endswith(("o", "os")):
         matches.add("masculine")
     if "masculine_and_feminine" in genders:
         matches.update({"feminine", "masculine"})
